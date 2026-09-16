@@ -16,6 +16,12 @@
 ### 修复
 
 - 旧版 `dsh-bridge` 写入的拼接消息 `source.form` 使用传输名（如 `dsh-chat-local-room`），不符合 DSH 会话格式 v0→v1 迁移的 `form` 白名单，表现为唤醒成员时 `resume failed`。新版 `dsh-bridge` 已改用 `relay`；受影响的旧会话需把该字段同步改为 `relay`（仅改此字段，保留其余字节与 Zstandard 帧结构）。详见 README「已知边界」。
+- `/health` 曾硬编码插件版本号，升级时不会跟随 `package.json`。现在直接从清单读取。
+
+### 维护
+
+- DSH 兼容范围改由 `package.json` 的 `dsh.engines.dsh` 声明（`>=0.1.5-rc.2`），支持该字段的安装器会据此提示版本不匹配。README 的说明与之一致。
+- 新增 `test/version-consistency.test.js` 锁定版本一致性：健康检查必须报告清单版本、清单必须声明 DSH 范围、README 必须写明同一版本、CHANGELOG 首条必须等于当前发布版本、源码不得硬编码任何发布版本号。
 
 ## [0.16.0-local.1]
 

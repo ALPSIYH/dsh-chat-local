@@ -26,6 +26,8 @@
 
 不需要远程服务，不依赖 `dsh-weave`。
 
+插件版本号以 `package.json` 的 `version` 为唯一来源，`/api/dsh-chat-local/health` 直接读取它，不另行维护副本。DSH 兼容范围声明在 `dsh.engines.dsh`，支持该字段的安装器（如 dshmarket）会据此提示版本不匹配；两者都有回归测试锁定，避免升级时漂移。
+
 ## 安装
 
 ```bash
