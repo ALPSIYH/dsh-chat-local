@@ -1,0 +1,52 @@
+{
+  "name": "dsh-chat-local",
+  "version": "0.16.1-local.1",
+  "description": "Native-workspace local multi-Agent group chat for DeepSeek Harness 0.1.5-rc.2.",
+  "type": "module",
+  "main": "./lib/index.js",
+  "types": "./lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./client": {
+      "default": "./lib/client.js"
+    },
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": []
+    }
+  },
+  "files": [
+    "lib/",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "node scripts/build-client.mjs",
+    "test": "node --test test/*.test.js",
+    "check": "node scripts/build-client.mjs --check && node --check lib/index.js && node --check lib/client.js && node --check lib/room-store.js && node --test test/*.test.js"
+  },
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "chat",
+    "local",
+    "group-chat",
+    "plugin"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "saxes": "6.0.0",
+    "yauzl": "3.4.0"
+  }
+}

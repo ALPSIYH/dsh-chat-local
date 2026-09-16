@@ -1,0 +1,4 @@
+# dsh-chat-local bundle patch: local-only group chat for DSH 0.1.2-rc.1
+- insert:
+    - id: dsh-chat-local
+      name: dsh-chat-local

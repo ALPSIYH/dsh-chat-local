@@ -1,0 +1,22 @@
+import { readFile, writeFile } from "node:fs/promises";
+import { createTextProtocol } from "../lib/text-protocol.js";
+import { createWorkProtocol } from "../lib/work-protocol.js";
+import { createWorkspaceComposer } from "../lib/workspace-ui.js";
+import { createTeamUI } from "../lib/team-ui.js";
+import { createGroupUI } from "../lib/group-ui.js";
+const path=new URL("../lib/client.js",import.meta.url);
+const source=await readFile(path,"utf8");
+const begin="    // BEGIN GENERATED TEXT PROTOCOL", end="    // END GENERATED TEXT PROTOCOL";
+const from=source.indexOf(begin), to=source.indexOf(end);
+if(from<0||to<from)throw new Error("client protocol markers missing");
+let next=source.slice(0,from)+`${begin}\n    const textProtocol = (${createTextProtocol.toString()})();\n${end}`+source.slice(to+end.length);
+const workBegin="    // BEGIN GENERATED WORK PROTOCOL",workEnd="    // END GENERATED WORK PROTOCOL";
+const workFrom=next.indexOf(workBegin),workTo=next.indexOf(workEnd);
+if(workFrom<0||workTo<workFrom)throw new Error("client work protocol markers missing");
+next=next.slice(0,workFrom)+`${workBegin}\n    const workProtocol = (${createWorkProtocol.toString()})();\n${workEnd}`+next.slice(workTo+workEnd.length);
+const startBegin="      // BEGIN GENERATED WORKSPACE COMPOSER",startEnd="      // END GENERATED WORKSPACE COMPOSER";
+const startFrom=next.indexOf(startBegin),startTo=next.indexOf(startEnd);
+if(startFrom<0||startTo<startFrom)throw new Error("workspace composer markers missing");
+next=next.slice(0,startFrom)+`${startBegin}\n      const TeamUI = (${createTeamUI.toString()})(React,h,api,ctx);\n      const GroupUI = (${createGroupUI.toString()})(React,h,api,TeamUI);\n      const WorkspaceComposer = (${createWorkspaceComposer.toString()})(React,h,api,ctx,TeamUI);\n${startEnd}`+next.slice(startTo+startEnd.length);
+if(process.argv.includes("--check")){if(next!==source)throw new Error("Client protocol is stale; run npm run build");}
+else if(next!==source) await writeFile(path,next);
