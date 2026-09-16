@@ -24,6 +24,7 @@
 
 - DSH 兼容范围改由 `package.json` 的 `dsh.engines.dsh` 声明（`>=0.1.5-rc.2`），支持该字段的安装器会据此提示版本不匹配。README 的说明与之一致。
 - 新增 `test/version-consistency.test.js` 锁定版本一致性：健康检查必须报告清单版本、清单必须声明 DSH 范围、README 必须写明同一版本、CHANGELOG 首条必须等于当前发布版本、锁文件必须记录同一版本、源码不得硬编码任何发布版本号，并检查已提交文件不含带用户名的绝对路径。
+- `LICENSE` 原先只有一行标题，缺少 MIT 正文与版权行，导致托管平台无法识别许可证（显示为 other）。已补全为标准 MIT 全文，版权行使用 `ALPSIYH`，与 `package.json` 的 `"license": "MIT"` 一致。
 
 ## [0.16.0-local.1]
 
