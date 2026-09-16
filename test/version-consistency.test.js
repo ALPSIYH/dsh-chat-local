@@ -83,16 +83,20 @@ test("no tracked file leaks a personal absolute path", async () => {
   // because such a path is invisible to a plain keyword search for the author.
   const placeholders = new Set(["example", "another", "your", "you", "me", "username", "user"]);
   const homePath = /\/(?:Users|home)\/([A-Za-z0-9._-]+)/g;
-  const roots = ["lib", "scripts", "test"];
+  // Walk every file in the repository rather than a hand-listed set of roots and
+  // extensions: the previous version skipped subdirectories and anything that was
+  // not js/mjs/md/json/yml, which is exactly where a personal path can hide
+  // (LICENSE, .gitignore, a nested *.d.ts or a future docs/ directory).
+  const SKIP_DIRECTORIES = new Set(["node_modules", ".git"]);
   const files = [];
-  for (const root of roots) {
-    for (const name of await readdir(new URL(`../${root}/`, import.meta.url))) {
-      if (name.endsWith(".js") || name.endsWith(".mjs")) files.push(`../${root}/${name}`);
+  async function walk(directory, prefix) {
+    for (const entry of await readdir(new URL(directory, import.meta.url), { withFileTypes: true })) {
+      if (SKIP_DIRECTORIES.has(entry.name)) continue;
+      if (entry.isDirectory()) await walk(`${directory}${entry.name}/`, `${prefix}${entry.name}/`);
+      else if (entry.isFile()) files.push(`../${prefix}${entry.name}`);
     }
   }
-  for (const name of await readdir(new URL("../", import.meta.url))) {
-    if (name.endsWith(".md") || name.endsWith(".json") || name.endsWith(".yml")) files.push(`../${name}`);
-  }
+  await walk("../", "");
   const leaks = [];
   for (const file of files) {
     const source = await readFile(new URL(file, import.meta.url), "utf8");

@@ -4,6 +4,23 @@
 
 > 房间状态格式（state version）与插件版本绑定。跨状态版本的升级前请备份，旧版程序无法读取新格式。
 
+## [0.16.2-local.1] — 2026-09-16
+
+### 修复
+
+- **受限回合不再能读到其他房间。** `discuss_only` / `read_only_audit` 回合按工具名放行只读工具，而 `read` 可以打开群聊自身的状态文件（其中含全部房间），`web_fetch` 可以访问本机回环地址上的本插件 HTTP 接口（该接口按设计不带凭证）。两者都越过了房间边界：现在会拒绝参数指向状态目录或状态文件的只读工具，以及指向回环、链路本地或私有网段的 `web_fetch` / `fetch`。普通文件读取与公网抓取不受影响。
+- **幂等重放不再谎报成功。** `operateWork`、`proposeCharter`、`reviewCharter`、`requestLedgerHandoff`、`triageLedgerEntry` 命中 `operationId` 重放时直接返回而不写盘；首次写盘失败时，重试会报告成功，而改动只存在于内存，重启即丢。这五处改为与同类操作一致，先落盘再返回。
+- **`setRoomProfile` 不再吞掉未传字段。** 原先用调用方传入的 `purpose`/`charter`/`source` 直接重建档案，只传 `charter` 会静默清空 `purpose` 并照样推进修订；改为与 `proposeCharter` 相同的合并语义。
+- **重复修正同一条消息不再报错。** `correctHumanMessage` 的幂等指纹包含它自身提交时会改写的投递状态，导致重试必然被判为「operation id 被复用」。现在按调用方的 operationId 直接返回已生效的修正。
+- HTTP 接口拒绝跨站请求（`Sec-Fetch-Site: cross-site`，或 `Origin` 与服务端 host 不一致），避免仅仅打开某个网页就能驱动本机接口。
+
+### 变更
+
+- 迁移前先把迁移前的状态文件复制为 `rooms.json.v<旧版本>.bak`；迁移不再是覆盖唯一副本的不可逆操作。
+- 群聊工作台的 `shell.overlay` 层级由 20 改为 30，避免与 Deep Research 同位叠加；该层缺失时不再在点击回调里抛错。
+- `cordis.patch.yml` 的注释不再复制 DSH 版本号（此前写着 `0.1.2-rc.1`，与清单声明的 `>=0.1.5-rc.2` 矛盾），改为指向 `package.json`。
+- 「个人路径」回归测试改为递归遍历仓库内全部文件。此前只扫 `lib|scripts|test` 下的 `*.js`/`*.mjs` 与根目录的 `*.md`/`*.json`/`*.yml`，`LICENSE`、`.gitignore`、`*.d.ts` 与所有子目录都不在检查范围内。
+
 ## [0.16.1-local.1] — 2026-09-16
 
 ### 变更
