@@ -161,7 +161,7 @@ npm test         # 仅跑回归测试
 
 提交前请确保 `npm run check` 全绿。当前测试覆盖房间存储、协作协议、章程与台账流程、权限拦截和 UI 组件。
 
-想在没有真实房间的情况下预览界面，可以运行 `node scripts/ui-fixture.mjs`，它会创建一套隔离的示例数据。
+`scripts/ui-fixture.mjs` 可在没有真实房间的情况下预览界面：它起一个 `127.0.0.1:3081` 的隔离服务，写入一套示例数据，并拦掉原生 Session、模型执行与真实文件访问。它借用宿主 DSH 附带的 React，因此需要 `DSH_MODULES_DIR` 指向 DSH 包内的 `node_modules`；在当前 DSH 版本上 React 已不再以独立包形式提供，脚本会以明确错误退出，尚未更新到新的模块布局。
 
 ## 已知边界
 

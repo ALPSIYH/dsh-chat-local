@@ -4,6 +4,7 @@ import {createServer} from "node:http";
 import {mkdtemp,mkdir,readFile} from "node:fs/promises";
 import {tmpdir} from "node:os";
 import {dirname,join,resolve} from "node:path";
+import {createRequire} from "node:module";
 import {fileURLToPath} from "node:url";
 import {DshChatLocalService} from "../lib/room-store.js";
 import {apply as installActualHttpHandler} from "../lib/index.js";
@@ -64,7 +65,16 @@ backendCtx.webServer={register(route){actualHandler=route.handler;return ()=>{};
 installActualHttpHandler(backendCtx,{path:statePath,replyTimeoutMs:300,monitorIntervalMs:30_000});
 if(!actualHandler)throw new Error("Actual plugin HTTP handler was not registered");
 
-const dshModules="/Users/example/.npm-global/lib/node_modules/@deepseek-ai/dsh/node_modules";
+// React is not a dependency of this plugin — the fixture borrows the host's
+// bundled copy. Point DSH_MODULES_DIR at the DSH install's node_modules when it
+// is not resolvable from here.
+function resolveDshModulesDir(){
+  if(process.env.DSH_MODULES_DIR)return process.env.DSH_MODULES_DIR;
+  const require=createRequire(import.meta.url);
+  try{return join(dirname(require.resolve("@deepseek-ai/dsh/package.json")),"node_modules");}catch{}
+  throw new Error("找不到 DSH 的安装位置；请设置 DSH_MODULES_DIR 指向 DSH 包内的 node_modules 目录");
+}
+const dshModules=resolveDshModulesDir();
 const trajectoryModules=join(dshModules,"@deepseek-ai/dsh-client-ui-trajectory/node_modules");
 const moduleFiles={
   react:join(trajectoryModules,"react/cjs/react.production.js"),

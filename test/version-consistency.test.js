@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable } from "node:stream";
@@ -69,6 +69,38 @@ test("the CHANGELOG's newest release is the version the manifest publishes", () 
   const first = changelog.match(/^##\s*\[([^\]]+)\]/m);
   assert.ok(first, "CHANGELOG must open with a released version heading");
   assert.equal(first[1], manifest.version, "record the released version in CHANGELOG before publishing it");
+});
+
+test("the lockfile records the version the manifest publishes", async () => {
+  const lock = JSON.parse(await readFile(new URL("../package-lock.json", import.meta.url), "utf8"));
+  assert.equal(lock.version, manifest.version, "regenerate the lockfile after a version bump");
+  assert.equal(lock.packages?.[""]?.version, manifest.version, "the root package entry must match too");
+});
+
+test("no tracked file leaks a personal absolute path", async () => {
+  // A home directory with a real user name in it is a personal identifier; the
+  // placeholder names used by tests and examples are not. This is checked
+  // because such a path is invisible to a plain keyword search for the author.
+  const placeholders = new Set(["example", "another", "your", "you", "me", "username", "user"]);
+  const homePath = /\/(?:Users|home)\/([A-Za-z0-9._-]+)/g;
+  const roots = ["lib", "scripts", "test"];
+  const files = [];
+  for (const root of roots) {
+    for (const name of await readdir(new URL(`../${root}/`, import.meta.url))) {
+      if (name.endsWith(".js") || name.endsWith(".mjs")) files.push(`../${root}/${name}`);
+    }
+  }
+  for (const name of await readdir(new URL("../", import.meta.url))) {
+    if (name.endsWith(".md") || name.endsWith(".json") || name.endsWith(".yml")) files.push(`../${name}`);
+  }
+  const leaks = [];
+  for (const file of files) {
+    const source = await readFile(new URL(file, import.meta.url), "utf8");
+    for (const match of source.matchAll(homePath)) {
+      if (!placeholders.has(match[1])) leaks.push(`${file.replace("../", "")}: ${match[0]}`);
+    }
+  }
+  assert.deepEqual(leaks, [], `personal paths must not be committed:\n${leaks.join("\n")}`);
 });
 
 test("no source file hardcodes a plugin release version", async () => {
