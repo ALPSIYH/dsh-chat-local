@@ -169,6 +169,46 @@ test("a failed anchor write never forks the chain the line already joined", asyn
   assert.deepEqual(verifyChain(lines), { ok: true, brokenAt: null });
 });
 
+test("a replace whose anchor write fails still chains the next append onto the restored head", async () => {
+  const { log, path } = await temporaryLog();
+  await log.append("r1", { type: "a", actor: { kind: "system", id: "system" }, payload: {} });
+  await log.append("r1", { type: "b", actor: { kind: "system", id: "system" }, payload: {} });
+  const restored = createEvent({ type: "restored", actor: { kind: "system", id: "system" }, payload: {} });
+  // Occupy the anchor path: the log's own rename lands first, then the anchor
+  // write fails. This is the one window where the cache and the disk can
+  // disagree about which head is current.
+  await rm(`${path}.head`);
+  await mkdir(`${path}.head`);
+  await assert.rejects(() => log.replace("r1", [restored]));
+  await rm(`${path}.head`, { recursive: true });
+  const appended = await log.append("r1", { type: "after", actor: { kind: "system", id: "system" }, payload: {} });
+  // A pre-restore head here would chain to an event the restored log no longer
+  // contains — the R12 defect on the failure path.
+  assert.equal(appended.prev, restored.hash);
+  const lines = (await readFile(path, "utf8")).split("\n").filter(Boolean).map((line) => JSON.parse(line));
+  assert.deepEqual(lines.map((event) => event.type), ["restored", "after"]);
+  assert.deepEqual(verifyChain(lines), { ok: true, brokenAt: null });
+});
+
+test("an append onto a truncated log is refused and counted, never healed into a fork", async () => {
+  const { directory, log, path } = await temporaryLog();
+  await log.append("r1", { type: "a", actor: { kind: "system", id: "system" }, payload: {} });
+  await log.append("r1", { type: "b", actor: { kind: "system", id: "system" }, payload: {} });
+  // Truncate to zero lines, leaving the anchor in place.
+  await writeFile(path, "");
+  // A fresh instance is the case that matters: after a restart the head cache is
+  // cold, so the append has to read and verify the log it is about to join.
+  const reopened = new EventLog(join(directory, "rooms.json"));
+  const refused = await reopened.append("r1", { type: "c", actor: { kind: "system", id: "system" }, payload: {} });
+  assert.equal(refused, null, "the append degrades rather than throwing");
+  assert.equal(reopened.health().failed, 1);
+  assert.match(reopened.health().lastError, /truncated/);
+  // Nothing was written, so the truncation stays visible instead of being
+  // papered over by a new head.
+  await assert.rejects(() => reopened.read("r1"), /event log is truncated/);
+  assert.equal(await readFile(path, "utf8"), "");
+});
+
 test("an append failure degrades without throwing and is counted", async () => {
   const directory = await mkdtemp(join(tmpdir(), "dcl-events-"));
   const log = new EventLog(join(directory, "rooms.json"));
