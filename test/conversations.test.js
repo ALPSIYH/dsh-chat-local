@@ -29,19 +29,22 @@ async function until(predicate){for(let n=0;n<100;n++){if(await predicate())retu
 test("v11 migration keeps legacy messages, work and Session bindings intact",()=>fixture(async h=>{
   const room=await seed(h.service);await send(h.service,room.id,"旧材料 /outside/paper.docx");await h.service.createLedgerEntry(room.id,{kind:"task",title:"旧任务"});
   const state=JSON.parse(await readFile(h.path,"utf8"));state.version=11;delete state.groups;delete state.workspace;delete state.rooms[0].groupId;
-  // A real v11 fixture predates the additive v14 identity directory.
+  // A real v11 fixture predates the additive v15 identity directory.
   for(const member of state.rooms[0].members){delete member.agentId;delete member.agentRevision;delete member.participationId;}
   const original=structuredClone(state.rooms[0]);await h.service.close();await writeFile(h.path,JSON.stringify(state));
   const restored=new DshChatLocalService(h.ctx,{path:h.path});
   try{
-    await restored.ready;const saved=JSON.parse(await readFile(h.path,"utf8"));assert.equal(saved.version,14);assert.equal(saved.groups.length,1);assert.equal(saved.rooms.length,1);
+    await restored.ready;const saved=JSON.parse(await readFile(h.path,"utf8"));assert.equal(saved.version,15);assert.equal(saved.groups.length,1);assert.equal(saved.rooms.length,1);
     for(const member of saved.rooms[0].members){
       assert.ok(member.agentId);assert.equal(member.agentRevision,1);assert.ok(member.participationId);
       assert.ok(saved.workspace.agents.some(agent=>agent.id===member.agentId));
       assert.ok(saved.workspace.participations.some(participant=>participant.id===member.participationId&&participant.roomId===room.id&&participant.sessionId===member.sessionId));
       delete member.agentId;delete member.agentRevision;delete member.participationId;
     }
-    delete saved.rooms[0].groupId;assert.deepEqual(saved.rooms[0],original);assert.equal(h.nativeWrites,0);
+    delete saved.rooms[0].groupId;
+    // `tick` is additive in v15: a v11 fixture has none, so the migration lands it at zero.
+    assert.equal(saved.rooms[0].tick, 0);delete saved.rooms[0].tick;
+    assert.deepEqual(saved.rooms[0],original);assert.equal(h.nativeWrites,0);
   }finally{await restored.close();}
 }));
 

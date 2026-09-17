@@ -296,7 +296,7 @@ test("charter revisions and source snapshots persist after restart, including us
     assert.equal(memory.history.length, 1);
     assert.equal("profileHistory" in (await restarted.listRooms())[0], false, "room polling does not duplicate the entire archive");
     const disk = JSON.parse(await readFile(h.path, "utf8"));
-    assert.equal(disk.version, 14);
+    assert.equal(disk.version, 15);
   } finally { if (restarted) await restarted.close(); await h.cleanup(); }
 });
 
@@ -915,7 +915,7 @@ test("searches messages by text, author and delivery status", async () => {
   } finally { await h.cleanup(); }
 });
 
-test("migrates v1 copied agent records into v14 membership and a group without copied model state", async () => {
+test("migrates v1 copied agent records into v15 membership and a group without copied model state", async () => {
   const h = await harness();
   try {
     await h.service.close();
@@ -931,7 +931,7 @@ test("migrates v1 copied agent records into v14 membership and a group without c
       { sessionId: "session-1", alias: "旧 Agent", ownership: "provisioned" }
     ]);
     const disk = JSON.parse(await readFile(h.path, "utf8"));
-    assert.equal(disk.version, 14);
+    assert.equal(disk.version, 15);
     assert.deepEqual(disk.rooms[0].ledger, []);
     assert.equal("agents" in disk, false);
     assert.equal("model" in disk.rooms[0].members[0], false);

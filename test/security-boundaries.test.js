@@ -84,7 +84,7 @@ test('a replayed operation re-persists, so a lost write is not reported as durab
   const first = await h.service.triageLedgerEntry(room.id, entry.id, { action: 'archive', expectedRevision: entry.revision, operationId: 'op-1', note: '归档' });
   assert.equal(first.status, 'archived');
   // Simulate the write the first attempt lost.
-  await writeFile(h.path, JSON.stringify({ version: 14, rooms: [], groups: [], workspace: {} }));
+  await writeFile(h.path, JSON.stringify({ version: 15, rooms: [], groups: [], workspace: {} }));
   const replay = await h.service.triageLedgerEntry(room.id, entry.id, { action: 'archive', expectedRevision: entry.revision, operationId: 'op-1', note: '归档' });
   assert.equal(replay.status, 'archived');
   assert.match(await readFile(h.path, 'utf8'), new RegExp(entry.id), 'the replay must re-persist the applied change');

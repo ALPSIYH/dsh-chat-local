@@ -155,7 +155,7 @@ test("legacy createRoom and addMember publish durable identities without adding 
   }finally{await reopened.close();}
 }));
 
-test("loading an incomplete v14 identity migration persists its repair before reporting readiness",()=>fixture(async h=>{
+test("loading an incomplete v15 identity migration persists its repair before reporting readiness",()=>fixture(async h=>{
   const room=await h.service.createRoom({name:"待補身分",members:[{kind:"session",sessionId:"old-a",alias:"A"}]});
   await h.service.close();const old=JSON.parse(await readFile(h.path,"utf8"));
   old.workspace.agents=[];old.workspace.participations=[];
@@ -164,7 +164,7 @@ test("loading an incomplete v14 identity migration persists its repair before re
   const reopened=new DshChatLocalService(h.ctx,{path:h.path});
   try{
     const loaded=await reopened.resolveRoom(room.id),disk=JSON.parse(await readFile(h.path,"utf8"));
-    assert.ok(loaded.members[0].agentId);assert.equal(disk.version,14);assert.equal(disk.workspace.agents.length,1);assert.equal(disk.workspace.participations.length,1);
+    assert.ok(loaded.members[0].agentId);assert.equal(disk.version,15);assert.equal(disk.workspace.agents.length,1);assert.equal(disk.workspace.participations.length,1);
     assert.equal(disk.rooms[0].members[0].agentId,loaded.members[0].agentId);assert.equal(disk.rooms[0].members[0].participationId,loaded.members[0].participationId);
     assert.deepEqual(disk.rooms[0].messages,old.rooms[0].messages);assert.deepEqual(disk.rooms[0].ledger,old.rooms[0].ledger);
   }finally{await reopened.close();}

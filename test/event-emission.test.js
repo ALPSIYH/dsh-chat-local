@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DshChatLocalService } from "../lib/room-store.js";
@@ -104,4 +104,76 @@ test("message and delivery events carry their ids, actor id and owning message",
   const created = (await h.service.eventsFor(h.room.id)).find((event) => event.type === "message.created");
   assert.equal(created.provenance.messageId, sent.id);
   assert.equal(created.provenance.actorId, "human:me");
+});
+
+test("a scheduled turn records its tick and the exact recipient order", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "dcl-tick-"));
+  const calls = [];
+  const ctx = {
+    agents: { get: () => ({ cancel() {} }) },
+    dshBridge: { status: async () => ({ state: "idle" }), deliverExternal: async (from, to) => { calls.push(to); } },
+    get(name) { return this[name]; }
+  };
+  const service = new DshChatLocalService(ctx, { path: join(directory, "rooms.json"), maxRounds: 1, replyTimeoutMs: 800 });
+  await service.ready;
+  const room = await service.createRoom({ name: "顺序", autoDeliver: true, members: [
+    { kind: "session", sessionId: "s1", alias: "甲" },
+    { kind: "session", sessionId: "s2", alias: "乙" }] });
+  await service.send({ roomId: room.id, author: "human:me", authorKind: "human", text: "开始" });
+  const deadline = Date.now() + 2000;
+  while (calls.length < 2 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 5));
+  const scheduled = (await service.eventsFor(room.id)).filter((event) => event.type === "turn.scheduled");
+  assert.equal(scheduled.length, 1);
+  assert.deepEqual(scheduled[0].payload.recipients, ["s1", "s2"]);
+  assert.equal(scheduled[0].payload.order, "configured");
+  assert.ok(scheduled[0].tick >= 1);
+});
+
+test("the tick is persisted and keeps increasing across a restart", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "dcl-tick-"));
+  const deliveries = [];
+  const ctx = { agents: { get: () => undefined },
+    dshBridge: { status: async () => ({ state: "idle" }), deliverExternal: async () => { deliveries.push(1); } },
+    get(n) { return this[n]; } };
+  const path = join(directory, "rooms.json");
+  const first = new DshChatLocalService(ctx, { path, maxRounds: 1, replyTimeoutMs: 800 });
+  await first.ready;
+  // autoDeliver must be true: the tick advances per *scheduled turn*, so a room
+  // that never schedules one has no ticks to compare.
+  const room = await first.createRoom({ name: "t", autoDeliver: true, members: [{ kind: "session", sessionId: "s1", alias: "甲" }] });
+  await first.send({ roomId: room.id, author: "human:me", authorKind: "human", text: "一" });
+  const firstDeadline = Date.now() + 2000;
+  while (!deliveries.length && Date.now() < firstDeadline) await new Promise((resolve) => setTimeout(resolve, 5));
+  const ticks = async (service) => (await service.eventsFor(room.id))
+    .filter((event) => event.type === "turn.scheduled").map((event) => event.tick);
+  assert.deepEqual(await ticks(first), [1]);
+  await first.close();
+  const second = new DshChatLocalService(ctx, { path, maxRounds: 1, replyTimeoutMs: 800 });
+  await second.ready;
+  await second.send({ roomId: room.id, author: "human:me", authorKind: "human", text: "二" });
+  const secondDeadline = Date.now() + 2000;
+  while (deliveries.length < 2 && Date.now() < secondDeadline) await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.deepEqual(await ticks(second), [1, 2]);
+});
+
+test("the tick reaches disk, so a restart resumes from it instead of replaying it", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "dcl-tick-"));
+  const deliveries = [];
+  const ctx = { agents: { get: () => undefined },
+    dshBridge: { status: async () => ({ state: "idle" }), deliverExternal: async () => { deliveries.push(1); } },
+    get(n) { return this[n]; } };
+  const path = join(directory, "rooms.json");
+  const first = new DshChatLocalService(ctx, { path, maxRounds: 1, replyTimeoutMs: 800 });
+  await first.ready;
+  const room = await first.createRoom({ name: "t", autoDeliver: true, members: [{ kind: "session", sessionId: "s1", alias: "甲" }] });
+  await first.send({ roomId: room.id, author: "human:me", authorKind: "human", text: "一" });
+  await waitFor(() => deliveries.length === 1, "the first delivery");
+  await first.close();
+  // The tick must be durable on its own: nothing else needs to be written for it
+  // to survive, otherwise a restart would silently replay the same number.
+  assert.equal(JSON.parse(await readFile(path, "utf8")).rooms[0].tick, 1);
+  const second = new DshChatLocalService(ctx, { path, maxRounds: 1, replyTimeoutMs: 800 });
+  await second.ready;
+  assert.equal((await second.resolveRoom(room.id)).tick, 1);
+  await second.close();
 });
