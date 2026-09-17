@@ -48,6 +48,17 @@ test("the health endpoint reports the version declared in package.json, not a co
   assert.equal(health.version, manifest.version, "health must report the manifest version so the two cannot drift");
 });
 
+test("health reports the audit side channel and the state version", async (t) => {
+  // `boot` already exists in this file and boots the real plugin against a
+  // temporary state file; reuse it instead of writing a second one.
+  const request = await boot(t);
+  const health = await request("/health");
+  assert.equal(health.status, "ok");
+  assert.equal(health.stateVersion, 15);
+  assert.equal(typeof health.audit.appended, "number");
+  assert.equal(typeof health.audit.failed, "number");
+});
+
 test("the package manifest declares the DeepSeek Harness range it is built against", () => {
   const range = manifest.dsh?.engines?.dsh;
   assert.equal(typeof range, "string");
