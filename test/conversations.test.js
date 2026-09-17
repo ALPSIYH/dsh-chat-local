@@ -29,8 +29,9 @@ async function until(predicate){for(let n=0;n<100;n++){if(await predicate())retu
 test("v11 migration keeps legacy messages, work and Session bindings intact",()=>fixture(async h=>{
   const room=await seed(h.service);await send(h.service,room.id,"旧材料 /outside/paper.docx");await h.service.createLedgerEntry(room.id,{kind:"task",title:"旧任务"});
   const state=JSON.parse(await readFile(h.path,"utf8"));state.version=11;delete state.groups;delete state.workspace;delete state.rooms[0].groupId;
-  // A real v11 fixture predates the additive v15 identity directory.
+  // A real v11 fixture predates the additive v15 identity directory and `tick`.
   for(const member of state.rooms[0].members){delete member.agentId;delete member.agentRevision;delete member.participationId;}
+  delete state.rooms[0].tick;
   const original=structuredClone(state.rooms[0]);await h.service.close();await writeFile(h.path,JSON.stringify(state));
   const restored=new DshChatLocalService(h.ctx,{path:h.path});
   try{

@@ -127,6 +127,67 @@ test("a scheduled turn records its tick and the exact recipient order", async ()
   assert.deepEqual(scheduled[0].payload.recipients, ["s1", "s2"]);
   assert.equal(scheduled[0].payload.order, "configured");
   assert.ok(scheduled[0].tick >= 1);
+  // The configured order is what the room was *told*; the executed order is what
+  // ran. The event must carry the latter, and it must match reality.
+  assert.deepEqual(scheduled[0].payload.executed, ["s1", "s2"]);
+  assert.deepEqual(calls, scheduled[0].payload.executed);
+  await service.close();
+});
+
+test("a rotated turn records the executed sequence the configured order cannot show", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "dcl-tick-"));
+  const deliveries = [];
+  const ctx = {
+    agents: { get: () => ({ cancel() {} }) },
+    dshBridge: { status: async () => ({ state: "idle" }), deliverExternal: async (from, to) => { deliveries.push(to); } },
+    get(name) { return this[name]; }
+  };
+  const path = join(directory, "rooms.json");
+  const first = new DshChatLocalService(ctx, { path, maxRounds: 1, replyTimeoutMs: 800 });
+  await first.ready;
+  const room = await first.createRoom({ name: "轮转", autoDeliver: true, members: [
+    { kind: "session", sessionId: "s1", alias: "甲" },
+    { kind: "session", sessionId: "s2", alias: "乙" }] });
+  await first.send({ roomId: room.id, author: "human:me", authorKind: "human", text: "一" });
+  await waitFor(() => deliveries.length >= 2, "both deliveries of the first turn");
+  // Quiesce before the second turn, so it is a fresh schedule rather than a
+  // superseded run: the rotation offset is the only thing that differs.
+  await first.close();
+  const second = new DshChatLocalService(ctx, { path, maxRounds: 1, replyTimeoutMs: 800 });
+  await second.ready;
+  await second.send({ roomId: room.id, author: "human:me", authorKind: "human", text: "二" });
+  await waitFor(() => deliveries.length >= 4, "both deliveries of the second turn");
+  const scheduled = (await second.eventsFor(room.id)).filter((event) => event.type === "turn.scheduled");
+  assert.equal(scheduled.length, 2);
+  // The configured order never changes, so it alone could not tell these apart.
+  assert.deepEqual(scheduled.map((event) => event.payload.recipients), [["s1", "s2"], ["s1", "s2"]]);
+  assert.deepEqual(scheduled.map((event) => event.payload.executed), [["s1", "s2"], ["s2", "s1"]]);
+  assert.deepEqual(scheduled.map((event) => event.payload.rotationStart), [0, 1]);
+  // "Step 3 was B, not C": the second turn's third participant is derivable from
+  // the event alone, and it matches who actually ran.
+  assert.equal(scheduled[1].payload.executed[0], "s2");
+  assert.deepEqual(deliveries.slice(2), scheduled[1].payload.executed);
+  await second.close();
+});
+
+test("a freshly created room starts at tick zero and persists it", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "dcl-tick-"));
+  const ctx = { agents: { get: () => undefined },
+    dshBridge: { status: async () => ({ state: "idle" }), deliverExternal: async () => {} },
+    get(n) { return this[n]; } };
+  const path = join(directory, "rooms.json");
+  const service = new DshChatLocalService(ctx, { path });
+  await service.ready;
+  // No members and autoDeliver off, so this room never schedules a turn: `tick`
+  // must exist on its own rather than be introduced by the scheduler.
+  const room = await service.createRoom({ name: "零", autoDeliver: false });
+  assert.equal(room.tick, 0);
+  await service.close();
+  assert.equal(JSON.parse(await readFile(path, "utf8")).rooms[0].tick, 0);
+  const reopened = new DshChatLocalService(ctx, { path });
+  await reopened.ready;
+  assert.equal((await reopened.resolveRoom(room.id)).tick, 0);
+  await reopened.close();
 });
 
 test("the tick is persisted and keeps increasing across a restart", async () => {
