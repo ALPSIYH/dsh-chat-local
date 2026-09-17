@@ -752,6 +752,18 @@ git commit -m "feat: record the exact per-turn prompt as the experiment's indepe
 
 **为什么**：研究需要「从第 k 步重启并改一个变量」；今天导出是单向的，无法回滚。
 
+### Task 6 必须一并实现的头部锚点（裁定 R10 + R12）
+
+`verifyChain` 没有头部锚点，因此把某个房间 JSONL 的**尾部截断**——最坏截到零行，此时 `verifyChain([])` 返回 `{ok:true}`——目前不可检测。**Task 2 曾把这个决策上交，裁定为归 Task 6**（Task 6 拥有唯一合法的截断者 `replace()`）**；Task 2 的审查另补充了一条必须遵守的约束（R12）。**
+
+实现要求：
+
+- **`EventLog.append`**：写完该行之后，把最新 hash 原子地写入 `eventLogPath(statePath, roomId) + ".head"`（单行 hex 文本）。
+- **`EventLog.replace(roomId, events)`**：必须在**同一个 temp+rename** 里一并写出锚点，并且**重置该房间的 `#lastHash` 缓存**。原因：`#lastHash` 只播种一次、永不失效，若不重置，恢复后的下一次 `append` 会从**恢复前**的 head 继续，把哈希链分叉。
+- **`EventLog.read(roomId)`** 把锚点当**高水位线**：仅当锚点文件存在、且它**不出现在任何已解析事件的 `hash` 中**时才报截断，错误信息要同时给出期望 head 与读到的 head。这样能捕获「截到零行」与「截掉 ≥2 行」，且**不会**对完好日志误报。
+- **已知残余（必须在报告中写明，不得静默略过）**：若进程在「写行」与「写锚」之间崩溃，锚点会落后一行；此后若恰好再截掉最后一行，锚点仍在已解析集合中，**这一行的截断不可见**。这是**已接受的残余**。
+- **新增测试**（写进 `test/event-log.test.js`）：①截到零行 → 报截断；②截掉 ≥2 行 → 报截断；③完好日志 → 不报且 `read` 不抛错；④`replace()` 之后紧接一次 `append`，链仍然连续（这正是不重置 `#lastHash` 会失败的用例）。
+
 - [ ] **Step 1: 写失败的测试**
 
 ```js
