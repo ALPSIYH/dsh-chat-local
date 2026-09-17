@@ -416,12 +416,18 @@ test("events are append-only: a replay of the same operation adds no second even
   assert.equal(events[0].payload.messageId, message.id);
 });
 
-test("a log write failure does not fail the send itself", async () => {
+test("a log write failure does not fail the send itself, and is counted", async () => {
   const h = await harness();
+  // Occupy the events directory path with a regular file, so every append fails.
+  await writeFile(join(h.directory, "events"), "not a directory");
   await assert.doesNotReject(() => h.service.send({ roomId: h.room.id, author: "human:me", authorKind: "human", text: "仍然成功" }));
-  assert.equal(h.service.logHealth().failed >= 0, true);
+  assert.ok(h.service.logHealth().failed >= 1, "the side channel must count the failure it degraded over");
+  // The room operation itself is intact: a second send still succeeds.
+  await assert.doesNotReject(() => h.service.send({ roomId: h.room.id, author: "human:me", authorKind: "human", text: "第二条" }));
 });
 ```
+
+> 需要在测试文件顶部把 `writeFile` 加入 `node:fs/promises` 的 import（`mkdtemp` 已在）。
 
 - [ ] **Step 2: 运行测试确认失败**
 
@@ -486,10 +492,13 @@ import { EventLog } from "./event-log.js";
             sessionKind: message.clientOperationId ? "interactive" : "interactive" } });
 ```
 
-先把 `#setDelivery(delivery, status, extra)` 的签名改为携带房间。**不要**在函数内部用 `this.state.rooms.find()` 猜房间 —— 并发下会取到错误的房间：
+先把 `#setDelivery(delivery, status, extra)` 的签名改为携带房间。**不要**在函数内部用 `this.state.rooms.find()` 猜房间 —— 并发下会取到错误的房间。
+
+**注意参数名**：**所有调用点传的是 `capture`，不是 `delivery`**（早先写的那段片段把第二个形参当成 delivery 来解引用，照抄会在第一次状态转换时抛 `TypeError`）。delivery 从 `capture.delivery` 取：
 
 ```js
-  #setDelivery(room, delivery, status, extra = {}) {
+  #setDelivery(room, capture, status, extra = {}) {
+    const delivery = capture.delivery;
     const previous = delivery.status;
     Object.assign(delivery, { status, ...extra });
     return this.#record(room, status === "sent"
@@ -502,7 +511,7 @@ import { EventLog } from "./event-log.js";
   }
 ```
 
-然后同步更新全部既有调用点，把 `room` 作为第一个实参传入（共 4 处：`superseded`、`failed`、`sent`、`delivered`）：
+然后同步更新**全部**既有调用点，把 `room` 作为第一个实参传入。**先用搜索确定实际数量，不要相信文档里的数字**：早先写的「4 处」其实是四个**状态名**，不是站点数 —— 真实文件里有 **12 处**（`failed` 5 处、`superseded` 2 处，其余各 1）。缩窄到四个状态会让审计日志丢掉 `working`/`replied`/`passed` 等转换，那是**不完整**的日志，因此全部保留、不得缩窄：
 
 ```js
       this.#setDelivery(room, capture, "superseded", { completedAt: Date.now(), error: "superseded by a newer room message" });
@@ -566,22 +575,31 @@ test("a scheduled turn records its tick and the exact recipient order", async ()
   assert.ok(scheduled[0].tick >= 1);
 });
 
-test("the tick is persisted and keeps increasing across operations", async () => {
+test("the tick is persisted and keeps increasing across a restart", async () => {
   const directory = await mkdtemp(join(tmpdir(), "dcl-tick-"));
+  const deliveries = [];
   const ctx = { agents: { get: () => undefined },
-    dshBridge: { status: async () => ({ state: "idle" }), deliverExternal: async () => {} }, get(n) { return this[n]; } };
+    dshBridge: { status: async () => ({ state: "idle" }), deliverExternal: async () => { deliveries.push(1); } },
+    get(n) { return this[n]; } };
   const path = join(directory, "rooms.json");
   const first = new DshChatLocalService(ctx, { path, maxRounds: 1, replyTimeoutMs: 800 });
   await first.ready;
-  const room = await first.createRoom({ name: "t", autoDeliver: false, members: [{ kind: "session", sessionId: "s1", alias: "甲" }] });
+  // autoDeliver must be true: the tick advances per *scheduled turn*, so a room
+  // that never schedules one has no ticks to compare.
+  const room = await first.createRoom({ name: "t", autoDeliver: true, members: [{ kind: "session", sessionId: "s1", alias: "甲" }] });
   await first.send({ roomId: room.id, author: "human:me", authorKind: "human", text: "一" });
-  const tickAfterFirst = (await first.eventsFor(room.id)).at(-1).tick;
+  const firstDeadline = Date.now() + 2000;
+  while (!deliveries.length && Date.now() < firstDeadline) await new Promise((resolve) => setTimeout(resolve, 5));
+  const ticks = async (service) => (await service.eventsFor(room.id))
+    .filter((event) => event.type === "turn.scheduled").map((event) => event.tick);
+  assert.deepEqual(await ticks(first), [1]);
   await first.close();
   const second = new DshChatLocalService(ctx, { path, maxRounds: 1, replyTimeoutMs: 800 });
   await second.ready;
   await second.send({ roomId: room.id, author: "human:me", authorKind: "human", text: "二" });
-  const tickAfterSecond = (await second.eventsFor(room.id)).at(-1).tick;
-  assert.ok(tickAfterSecond > tickAfterFirst);
+  const secondDeadline = Date.now() + 2000;
+  while (deliveries.length < 2 && Date.now() < secondDeadline) await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.deepEqual(await ticks(second), [1, 2]);
 });
 ```
 
