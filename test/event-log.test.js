@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createEvent, serializeEvent, verifyChain, EVENT_LOG_VERSION, EventLog } from "../lib/event-log.js";
+import { createEvent, hashEvent, serializeEvent, verifyChain, EVENT_LOG_VERSION, EventLog } from "../lib/event-log.js";
 
 /** A log in its own temp directory, with the room log path the anchor sits beside. */
 async function temporaryLog() {
@@ -41,7 +41,21 @@ test("a tampered event breaks the chain at its index", () => {
   const c = createEvent({ type: "c", actor: { kind: "human", id: "human:me" }, payload: {}, provenance: { roomId: "r" }, prev: b.hash });
   assert.deepEqual(verifyChain([a, b, c]), { ok: true, brokenAt: null });
   const tampered = { ...b, payload: { sneaky: true } };
-  assert.deepEqual(verifyChain([a, tampered, c]), { ok: false, brokenAt: 1 });
+  assert.deepEqual(verifyChain([a, tampered, c]), { ok: false, brokenAt: 1, reason: "hash-mismatch" });
+});
+
+test("an envelope version this build cannot read is refused, not walked", () => {
+  const event = createEvent({ type: "a", actor: { kind: "human", id: "human:me" },
+    payload: {}, provenance: { roomId: "r" } });
+  // `v` is part of the hash material, so the bump is re-hashed: otherwise the
+  // hash check would reject this event anyway and the version check would never
+  // be the reason it was refused.
+  const future = { ...event, v: EVENT_LOG_VERSION + 1 };
+  future.hash = hashEvent(future);
+  // The chain itself is intact: prev and hash both verify. Only the reader's
+  // ability to interpret the envelope is in question.
+  assert.deepEqual(verifyChain([future]), { ok: false, brokenAt: 0, reason: "unsupported-version" });
+  assert.deepEqual(verifyChain([event]), { ok: true, brokenAt: null });
 });
 
 test("a serialized line verifies after read-back even with an undefined-valued key", () => {
@@ -217,4 +231,114 @@ test("an append failure degrades without throwing and is counted", async () => {
   await assert.doesNotReject(() => log.append("r1", { type: "a", actor: { kind: "system", id: "system" }, payload: {} }));
   assert.equal(log.health().appended, 0);
   assert.ok(log.health().failed >= 1);
+});
+
+test("a reported write failure names the file without leaking its path", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "dcl-events-"));
+  const log = new EventLog(join(directory, "rooms.json"));
+  // This is the real shape of the leak: occupying the events directory with a
+  // file fails the append with ENOTDIR, whose raw Node message embeds the
+  // absolute path it failed on. /health answers unauthenticated on loopback, so
+  // that message must never be what is published.
+  await writeFile(join(directory, "events"), "not a directory");
+  assert.equal(await log.append("r1", { type: "a", actor: { kind: "system", id: "system" }, payload: {} }), null);
+  const { lastError } = log.health();
+  assert.equal(typeof lastError, "string");
+  assert.ok(!lastError.includes("/"), `the reported error must carry no path: ${lastError}`);
+  assert.ok(!lastError.includes(directory), "the reported error must not carry the state directory");
+  // Still diagnostic: the errno code and the leaf that failed.
+  assert.match(lastError, /^ENOTDIR/);
+  assert.match(lastError, /r1\.jsonl/);
+});
+
+test("a later successful append clears the latched error but not the count", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "dcl-events-"));
+  const path = join(directory, "rooms.json");
+  const log = new EventLog(path);
+  await writeFile(join(directory, "events"), "not a directory");
+  await log.append("r1", { type: "a", actor: { kind: "system", id: "system" }, payload: {} });
+  assert.notEqual(log.health().lastError, null);
+  // Repair the directory, then append for real: the most recent failure is no
+  // longer the log's current health, so it must not stay latched for the
+  // lifetime of the process while `failed` keeps the lifetime tally.
+  await rm(join(directory, "events"));
+  await log.append("r1", { type: "b", actor: { kind: "system", id: "system" }, payload: {} });
+  assert.equal(log.health().appended, 1);
+  assert.equal(log.health().failed, 1);
+  assert.equal(log.health().lastError, null);
+});
+
+test("a dropped append is named, not only counted", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "dcl-events-"));
+  const log = new EventLog(join(directory, "rooms.json"));
+  await writeFile(join(directory, "events"), "not a directory");
+  await log.append("r1", { type: "message.created", actor: { kind: "human", id: "human:me" },
+    payload: { messageId: "m1" }, provenance: { roomId: "r1" } });
+  const health = log.health();
+  assert.equal(health.failed, 1);
+  assert.equal(health.droppedCount, 1);
+  // The message is already durable and will never get an event, so the gap is
+  // identifying: an operator can tell which record has no audit trail.
+  assert.deepEqual(health.dropped, [{ roomId: "r1", type: "message.created", messageId: "m1" }]);
+  // The health shape is a snapshot, not a handle on the live list.
+  health.dropped.push({ roomId: "forged" });
+  assert.equal(log.health().dropped.length, 1);
+});
+
+test("the named gaps are bounded, so a long outage cannot grow the health shape", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "dcl-events-"));
+  const log = new EventLog(join(directory, "rooms.json"));
+  await writeFile(join(directory, "events"), "not a directory");
+  for (let index = 0; index < 25; index += 1) {
+    await log.append("r1", { type: "message.created", actor: { kind: "human", id: "human:me" },
+      payload: { messageId: `m${index}` }, provenance: { roomId: "r1" } });
+  }
+  const health = log.health();
+  assert.equal(health.droppedCount, 25);
+  assert.equal(health.dropped.length, 20);
+  // The most recent gaps are the ones worth naming.
+  assert.equal(health.dropped.at(-1).messageId, "m24");
+});
+
+test("a primed log appends without parsing the room file again", async () => {
+  const { directory, log } = await temporaryLog();
+  const first = await log.append("r1", { type: "a", actor: { kind: "system", id: "system" }, payload: {} });
+  // Priming is what moves the full-log parse out of the send path: a fresh
+  // instance starts cold, exactly as it does after a process restart.
+  const reopened = new EventLog(join(directory, "rooms.json"));
+  await reopened.prime(["r1"]);
+  reopened.read = async () => { throw new Error("append must not read the log"); };
+  const appended = await reopened.append("r1", { type: "b", actor: { kind: "system", id: "system" }, payload: {} });
+  assert.ok(appended, `the primed append must not fall back to a read (${reopened.health().lastError})`);
+  assert.equal(appended.prev, first.hash);
+  assert.equal(reopened.health().appended, 1);
+});
+
+test("priming a log it cannot verify leaves it cold, so the truncation still surfaces", async () => {
+  const { directory, log, path } = await temporaryLog();
+  await log.append("r1", { type: "a", actor: { kind: "system", id: "system" }, payload: {} });
+  await log.append("r1", { type: "b", actor: { kind: "system", id: "system" }, payload: {} });
+  await writeFile(path, "");
+  // A cold cache is the safe failure: priming must never seed a head from a log
+  // it could not verify, or a detected truncation would become a silent fork.
+  const reopened = new EventLog(join(directory, "rooms.json"));
+  await assert.doesNotReject(() => reopened.prime(["r1"]));
+  assert.equal(await reopened.append("r1", { type: "c", actor: { kind: "system", id: "system" }, payload: {} }), null);
+  assert.match(reopened.health().lastError, /truncated/);
+  assert.equal(reopened.health().failed, 1);
+});
+
+test("drain waits for appends no caller awaited", async () => {
+  const { log } = await temporaryLog();
+  let settled = 0;
+  const track = (promise) => promise.then((event) => { if (event) settled += 1; });
+  // Fire-and-forget, exactly as the delivery path issues them, then drain alone:
+  // a caller that removes the state tree right after must find the log complete.
+  track(log.append("r1", { type: "a", actor: { kind: "system", id: "system" }, payload: {} }));
+  track(log.append("r1", { type: "b", actor: { kind: "system", id: "system" }, payload: {} }));
+  await log.drain();
+  assert.equal(settled, 2);
+  const events = await log.read("r1");
+  assert.equal(events.length, 2);
+  assert.deepEqual(verifyChain(events), { ok: true, brokenAt: null });
 });

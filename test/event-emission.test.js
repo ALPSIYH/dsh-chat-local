@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DshChatLocalService } from "../lib/room-store.js";
@@ -13,6 +13,16 @@ async function waitFor(predicate, label = "condition") {
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
   throw new Error(`timed out waiting for ${label}`);
+}
+
+/** Drive one delivered member through a complete native turn, as DSH reports it. */
+async function replyTo(service, call, text) {
+  await service.observeSessionEvent(call.to, { type: "turn/start", data: { turn: 1 } });
+  await service.observeSessionEvent(call.to, { type: "user/message", data: { content: [{ type: "text",
+    text: `[dsh-bridge dsh-chat-local-room message ${call.delivery.id} from ${call.from}]` }] } });
+  await service.observeSessionEvent(call.to, { type: "assistant/message", data: { turn: 1, step: 1,
+    message: { content: [{ type: "text", text }] } } });
+  await service.observeSessionEvent(call.to, { type: "turn/end", data: { turn: 1, reason: { kind: "completed" } } });
 }
 
 async function harness(options = {}) {
@@ -260,4 +270,129 @@ test("the tick reaches disk, so a restart resumes from it instead of replaying i
   await second.ready;
   assert.equal((await second.resolveRoom(room.id)).tick, 1);
   await second.close();
+});
+
+test("a delivery event names the same delivery the prompt does, so the pair joins by script", async () => {
+  const h = await harness({ autoDeliver: true });
+  await h.service.send({ roomId: h.room.id, author: "human:me", authorKind: "human", text: "配对" });
+  const call = await waitFor(() => h.calls[0], "the member delivery");
+  await replyTo(h.service, call, "回复");
+  const events = await waitFor(async () => {
+    const found = await h.service.eventsFor(h.room.id);
+    return found.some((event) => event.type === "delivery.settled" && event.payload.status === "replied") ? found : undefined;
+  }, "the settled delivery");
+  const prompt = events.find((event) => event.type === "turn.prompt");
+  const sent = events.find((event) => event.type === "delivery.sent");
+  const settled = events.find((event) => event.type === "delivery.settled" && event.payload.status === "replied");
+  assert.equal(prompt.payload.deliveryId, call.delivery.id);
+  // Without an id on the delivery events, pairing the recorded prompt with the
+  // delivery it produced needs tick order plus member: an inference, not a join.
+  assert.equal(sent.payload.deliveryId, prompt.payload.deliveryId);
+  assert.equal(settled.payload.deliveryId, prompt.payload.deliveryId);
+});
+
+test("a restart records an event for every in-flight delivery it recovers as failed", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "dcl-restart-"));
+  const path = join(directory, "rooms.json");
+  const deliveries = [];
+  const ctx = { agents: { get: () => ({ cancel() {} }) },
+    dshBridge: { status: async () => ({ state: "idle" }), deliverExternal: async () => { deliveries.push(1); } },
+    get(name) { return this[name]; } };
+  const first = new DshChatLocalService(ctx, { path, maxRounds: 1, replyTimeoutMs: 60_000 });
+  // Registered before any assertion: a failing assertion must not leave the
+  // long reply timer holding the test file open.
+  t.after(() => first.close());
+  await first.ready;
+  const room = await first.createRoom({ name: "重启", autoDeliver: true, members: [{ kind: "session", sessionId: "s1", alias: "甲" }] });
+  const sent = await first.send({ roomId: room.id, author: "human:me", authorKind: "human", text: "一" });
+  await waitFor(() => deliveries.length === 1, "the in-flight delivery");
+  // Dispatched but never observed, so the delivery is still in flight when the
+  // process ends: shutdown does not settle it.
+  await first.close();
+  const inFlight = JSON.parse(await readFile(path, "utf8")).rooms[0].messages.flatMap((message) => message.deliveries);
+  // Dispatched, never observed: whichever in-flight status it reached, shutdown
+  // does not settle it.
+  assert.equal(inFlight.length, 1);
+  assert.ok(["queued", "sent", "delivered", "working"].includes(inFlight[0].status), inFlight[0].status);
+  const second = new DshChatLocalService(ctx, { path, maxRounds: 1, replyTimeoutMs: 60_000 });
+  t.after(() => second.close());
+  await second.ready;
+  const recovered = (await second.messages(room.id)).flatMap((message) => message.deliveries);
+  assert.equal(recovered.length, 1);
+  assert.equal(recovered[0].status, "failed");
+  assert.equal(recovered[0].recoveryReason, "restart");
+  const settle = (await second.eventsFor(room.id))
+    .find((event) => event.type === "delivery.settled" && event.payload.deliveryId === recovered[0].id);
+  // The status a restart recovers as failed is this experiment's dependent
+  // variable, so the log must not leave it indistinguishable from a delivery
+  // that genuinely settled.
+  assert.ok(settle, "the restart recovery must explain the status change in the log");
+  assert.equal(settle.payload.status, "failed");
+  assert.equal(settle.payload.previous, inFlight[0].status);
+  assert.equal(settle.payload.recoveryReason, "restart");
+  assert.deepEqual(settle.causes, [sent.id]);
+});
+
+test("the settle the save persisted is recorded before the message.created that same save made durable", async () => {
+  const h = await harness({ autoDeliver: true });
+  await h.service.send({ roomId: h.room.id, author: "human:me", authorKind: "human", text: "开始" });
+  const call = await waitFor(() => h.calls[0], "the member delivery");
+  await replyTo(h.service, call, "自动回复");
+  // One read of an append-only sequence: the index is the ordering evidence, so
+  // there is no timing window to sample and no repetition to flake on.
+  const events = await waitFor(async () => {
+    const found = await h.service.eventsFor(h.room.id);
+    return found.some((event) => event.type === "message.created" && event.payload.authorKind === "session") ? found : undefined;
+  }, "the agent reply event");
+  const settled = events.findIndex((event) => event.type === "delivery.settled" && event.payload.status === "replied");
+  const created = events.findIndex((event) => event.type === "message.created" && event.payload.authorKind === "session");
+  assert.ok(settled >= 0, "the reply must settle its delivery");
+  assert.ok(created >= 0, "the reply must be audited");
+  // The settle is a state change the following save persists, and the audit of
+  // the reply may only be recorded by that save. Recording the reply first is
+  // the R20 defect: a log entry describing state that had not reached disk.
+  assert.ok(settled < created, `the settle (${settled}) must precede the created event (${created})`);
+});
+
+test("the message.created of a superseding send follows the settles that same save persisted", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "dcl-supersede-"));
+  const deliveries = [];
+  const ctx = { agents: { get: () => ({ cancel() {} }) },
+    dshBridge: { status: async () => ({ state: "idle" }), deliverExternal: async () => { deliveries.push(1); } },
+    get(name) { return this[name]; } };
+  const service = new DshChatLocalService(ctx, { path: join(directory, "rooms.json"), maxRounds: 1, replyTimeoutMs: 60_000 });
+  // Registered before any assertion: a failing assertion must not leave the
+  // long reply timer holding the test file open.
+  t.after(() => service.close());
+  await service.ready;
+  const room = await service.createRoom({ name: "取代", autoDeliver: true, members: [
+    { kind: "session", sessionId: "s1", alias: "甲" },
+    { kind: "session", sessionId: "s2", alias: "乙" }] });
+  await service.send({ roomId: room.id, author: "human:me", authorKind: "human", text: "一" });
+  // The turn loop is sequential, so exactly one capture is in flight: the first
+  // delivery has been dispatched and nothing has settled it.
+  await waitFor(() => deliveries.length === 1, "the in-flight delivery");
+  const second = await service.send({ roomId: room.id, author: "human:me", authorKind: "human", text: "二" });
+  const events = await service.eventsFor(room.id);
+  const settles = events.flatMap((event, index) => event.type === "delivery.settled" && event.payload.status === "superseded" ? [index] : []);
+  const created = events.findIndex((event) => event.type === "message.created" && event.payload.messageId === second.id);
+  assert.equal(settles.length, 1);
+  assert.ok(created >= 0, "the superseding message must be audited");
+  // #commitSend is the explicit save-then-record site: its message.created can
+  // only appear after everything the same send recorded before that save, which
+  // here is the supersede settle. Recording it earlier would describe state that
+  // had not reached disk.
+  assert.ok(created > Math.max(...settles), `created (${created}) must follow the settles (${settles})`);
+});
+
+test("a save that never lands leaves no message.created behind it", async () => {
+  const h = await harness();
+  // Replace the state file with a directory: every rename onto it fails, so the
+  // save that would have made this message durable cannot succeed.
+  await rm(join(h.directory, "rooms.json"));
+  await mkdir(join(h.directory, "rooms.json"));
+  await assert.rejects(() => h.service.send({ roomId: h.room.id, author: "human:me", authorKind: "human", text: "不会落地" }));
+  // #commitSend saves before it records; an event here would describe state that
+  // never reached disk.
+  assert.deepEqual(await h.service.eventsFor(h.room.id), []);
 });

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
+import { access, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable } from "node:stream";
@@ -30,18 +30,26 @@ async function boot(t) {
     for (const dispose of disposers.reverse()) await dispose();
     await rm(directory, { recursive: true, force: true });
   });
-  return async (path) => {
-    const req = Readable.from([]);
-    req.url = `/api/dsh-chat-local${path}`; req.method = "GET"; req.headers = {};
-    let status, body;
-    await handler(req, { writeHead(code) { status = code; }, end(text) { body = JSON.parse(text); } });
-    assert.equal(status, 200, body?.error);
-    return body.value;
+  /** One real request through the plugin's own handler, status and headers intact. */
+  const raw = async (path, { method = "GET", body, ifNoneMatch } = {}) => {
+    const req = Readable.from(body === undefined ? [] : [Buffer.from(JSON.stringify(body))]);
+    req.url = `/api/dsh-chat-local${path}`; req.method = method;
+    req.headers = ifNoneMatch === undefined ? {} : { "if-none-match": ifNoneMatch };
+    const result = {};
+    await handler(req, { writeHead(status, headers) { Object.assign(result, { status, headers }); },
+      end(text) { result.body = text; } });
+    return result;
   };
+  const request = async (path, options) => {
+    const result = await raw(path, options);
+    assert.equal(result.status, 200, result.body);
+    return JSON.parse(result.body).value;
+  };
+  return { request, raw, directory };
 }
 
 test("the health endpoint reports the version declared in package.json, not a copied literal", async (t) => {
-  const request = await boot(t);
+  const { request } = await boot(t);
   const health = await request("/health");
   assert.equal(health.status, "ok");
   assert.equal(health.name, manifest.name);
@@ -51,12 +59,33 @@ test("the health endpoint reports the version declared in package.json, not a co
 test("health reports the audit side channel and the state version", async (t) => {
   // `boot` already exists in this file and boots the real plugin against a
   // temporary state file; reuse it instead of writing a second one.
-  const request = await boot(t);
+  const { request } = await boot(t);
   const health = await request("/health");
   assert.equal(health.status, "ok");
   assert.equal(health.stateVersion, 15);
   assert.equal(typeof health.audit.appended, "number");
   assert.equal(typeof health.audit.failed, "number");
+});
+
+test("health's ETag ignores the volatile audit counters, so a conditional GET still answers 304", async (t) => {
+  const { request, raw } = await boot(t);
+  const before = await request("/health");
+  assert.equal(before.audit.appended, 0);
+  const etag = (await raw("/health")).headers.etag;
+  assert.ok(etag, "a read response carries an ETag");
+  // One real profile edit appends a message.created, which moves the monotonic
+  // counters. They only ever climb, so hashing them into the tag would make it
+  // change on every logged event and no conditional GET could ever return 304.
+  const room = await request("/rooms", { method: "POST", body: { name: "條件", autoDeliver: false } });
+  await request(`/rooms/${room.id}/profile`, { method: "POST",
+    body: { charter: "新章程", expectedRevision: room.profile.revision } });
+  const after = await request("/health");
+  assert.ok(after.audit.appended >= 1, "the edit must have been audited");
+  const afterRaw = await raw("/health");
+  assert.equal(afterRaw.headers.etag, etag, "an audit write must not change what the body is identified by");
+  const unchanged = await raw("/health", { ifNoneMatch: etag });
+  assert.equal(unchanged.status, 304);
+  assert.equal(unchanged.body, undefined);
 });
 
 test("the package manifest declares the DeepSeek Harness range it is built against", () => {
@@ -74,6 +103,38 @@ test("the README states the same DeepSeek Harness version the manifest declares"
     readme.includes(`\`${declared}\``),
     `README must name the declared DSH version \`${declared}\` so the prose and the machine-readable range agree`
   );
+});
+
+test("the README's offline-verification promise names an entry point that is shipped", async () => {
+  // `verifyChain`'s only production caller validates an *imported* snapshot, so
+  // the README may promise offline verification of the live log only while the
+  // entry point it names actually exists.
+  assert.match(readme, /scripts\/verify-event-log\.mjs/, "name the offline verifier in the README");
+  await access(new URL("../scripts/verify-event-log.mjs", import.meta.url));
+});
+
+test("/health publishes a path-free audit error and names the record it dropped", async (t) => {
+  const { request, directory } = await boot(t);
+  // Occupy the events directory with a file: the next audit append fails exactly
+  // as the leak was reported, ENOTDIR with an absolute path in the raw message.
+  await writeFile(join(directory, "events"), "not a directory");
+  const room = await request("/rooms", { method: "POST", body: { name: "洩漏", autoDeliver: false } });
+  await request(`/rooms/${room.id}/profile`, { method: "POST",
+    body: { charter: "新章程", expectedRevision: room.profile.revision } });
+  const health = await request("/health");
+  assert.equal(typeof health.audit.lastError, "string");
+  // /health answers unauthenticated on loopback, so the absolute path must not
+  // be part of what it reports.
+  assert.ok(!health.audit.lastError.includes("/"), health.audit.lastError);
+  assert.ok(!health.audit.lastError.includes(directory), health.audit.lastError);
+  assert.match(health.audit.lastError, /^ENOTDIR/);
+  // The dropped append is named, not only counted: the operator can tell which
+  // record has no event for it.
+  assert.equal(health.audit.droppedCount >= 1, true);
+  const gap = health.audit.dropped.at(-1);
+  assert.equal(gap.roomId, room.id);
+  assert.equal(gap.type, "message.created");
+  assert.equal(typeof gap.messageId, "string");
 });
 
 test("the CHANGELOG's newest release is the version the manifest publishes", () => {
