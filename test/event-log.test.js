@@ -34,3 +34,9 @@ test("a tampered event breaks the chain at its index", () => {
   const tampered = { ...b, payload: { sneaky: true } };
   assert.deepEqual(verifyChain([a, tampered, c]), { ok: false, brokenAt: 1 });
 });
+
+test("a serialized line verifies after read-back even with an undefined-valued key", () => {
+  const event = createEvent({ type: "a", actor: { kind: "human", id: "human:me" },
+    payload: { x: undefined }, provenance: { roomId: "r" } });
+  assert.deepEqual(verifyChain([JSON.parse(serializeEvent(event))]), { ok: true, brokenAt: null });
+});
