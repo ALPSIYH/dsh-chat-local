@@ -87,7 +87,10 @@ test("no tracked file leaks a personal absolute path", async () => {
   // extensions: the previous version skipped subdirectories and anything that was
   // not js/mjs/md/json/yml, which is exactly where a personal path can hide
   // (LICENSE, .gitignore, a nested *.d.ts or a future docs/ directory).
-  const SKIP_DIRECTORIES = new Set(["node_modules", ".git"]);
+  // Scratch directories this repository never tracks or publishes. The guard's
+  // claim is about *tracked* files, and an agent's own working notes legitimately
+  // name the checkout they are working in; scanning them only produces noise.
+  const SKIP_DIRECTORIES = new Set(["node_modules", ".git", ".superpowers", ".worktrees"]);
   const files = [];
   async function walk(directory, prefix) {
     for (const entry of await readdir(new URL(directory, import.meta.url), { withFileTypes: true })) {
