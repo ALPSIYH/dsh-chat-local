@@ -5,18 +5,32 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DshChatLocalService } from "../lib/room-store.js";
 
-async function harness() {
+async function waitFor(predicate, label = "condition") {
+  const deadline = Date.now() + 2_000;
+  while (Date.now() < deadline) {
+    const value = await predicate();
+    if (value) return value;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`timed out waiting for ${label}`);
+}
+
+async function harness(options = {}) {
   const directory = await mkdtemp(join(tmpdir(), "dcl-emit-"));
+  const calls = [];
   const ctx = {
     agents: { get: () => ({ cancel() {} }) },
-    dshBridge: { status: async () => ({ state: "idle" }), deliverExternal: async () => {} },
+    dshBridge: {
+      status: async () => ({ state: "idle" }),
+      deliverExternal: async (from, to, text, delivery) => { calls.push({ from, to, text, delivery }); }
+    },
     get(name) { return this[name]; }
   };
   const service = new DshChatLocalService(ctx, { path: join(directory, "rooms.json"), maxRounds: 1, replyTimeoutMs: 800 });
   await service.ready;
-  const room = await service.createRoom({ name: "事件测试", autoDeliver: false,
+  const room = await service.createRoom({ name: "事件测试", autoDeliver: options.autoDeliver ?? false,
     members: [{ kind: "session", sessionId: "s1", alias: "成员" }] });
-  return { directory, service, room };
+  return { directory, service, room, calls };
 }
 
 test("sending a message appends an immutable message.created event with provenance", async () => {
@@ -54,4 +68,40 @@ test("a log write failure does not fail the send itself", async () => {
   assert.equal(h.service.logHealth().failed >= 1, true);
   const messages = await h.service.messages(h.room.id);
   assert.equal(messages.some((message) => message.id === sent.id && message.text === "仍然成功"), true);
+});
+
+test("an agent auto-reply appends its own message.created event", async () => {
+  const h = await harness({ autoDeliver: true });
+  const trigger = await h.service.send({ roomId: h.room.id, author: "human:me", authorKind: "human", text: "开始" });
+  const call = await waitFor(() => h.calls[0], "the member delivery");
+  await h.service.observeSessionEvent(call.to, { type: "turn/start", data: { turn: 1 } });
+  await h.service.observeSessionEvent(call.to, { type: "user/message", data: { content: [{ type: "text",
+    text: `[dsh-bridge dsh-chat-local-room message ${call.delivery.id} from ${call.from}]` }] } });
+  await h.service.observeSessionEvent(call.to, { type: "assistant/message", data: { turn: 1, step: 1,
+    message: { content: [{ type: "text", text: "自动回复" }] } } });
+  await h.service.observeSessionEvent(call.to, { type: "turn/end", data: { turn: 1, reason: { kind: "completed" } } });
+  const created = await waitFor(async () => {
+    const found = (await h.service.eventsFor(h.room.id)).filter((event) => event.type === "message.created");
+    return found.length >= 2 ? found : undefined;
+  }, "the agent reply event");
+  assert.equal(created.length, 2);
+  const reply = created.find((event) => event.payload.authorKind === "session");
+  assert.equal(reply.payload.text, "自动回复");
+  assert.equal(reply.provenance.originClass, "agent");
+  assert.equal(reply.provenance.messageId, reply.payload.messageId);
+  assert.deepEqual(reply.causes, [trigger.id]);
+});
+
+test("message and delivery events carry their ids, actor id and owning message", async () => {
+  const h = await harness({ autoDeliver: true });
+  const sent = await h.service.send({ roomId: h.room.id, author: "human:me", authorKind: "human", text: "投递" });
+  const delivery = await waitFor(async () =>
+    (await h.service.eventsFor(h.room.id)).find((event) => event.type === "delivery.sent"), "the delivery.sent event");
+  assert.deepEqual(delivery.causes, [sent.id]);
+  assert.equal(delivery.provenance.messageId, sent.id);
+  assert.equal(delivery.provenance.actorId, "s1");
+  assert.equal(delivery.provenance.roomId, h.room.id);
+  const created = (await h.service.eventsFor(h.room.id)).find((event) => event.type === "message.created");
+  assert.equal(created.provenance.messageId, sent.id);
+  assert.equal(created.provenance.actorId, "human:me");
 });
