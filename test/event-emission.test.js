@@ -217,6 +217,29 @@ test("the tick is persisted and keeps increasing across a restart", async () => 
   assert.deepEqual(await ticks(second), [1, 2]);
 });
 
+test("the exact prompt handed to a member is recorded by hash and by content", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "dcl-prompt-"));
+  const prompts = [];
+  const ctx = {
+    agents: { get: () => ({ cancel() {} }) },
+    dshBridge: { status: async () => ({ state: "idle" }), deliverExternal: async (_from, to, text) => { prompts.push({ to, text }); } },
+    get(name) { return this[name]; }
+  };
+  const service = new DshChatLocalService(ctx, { path: join(directory, "rooms.json"), maxRounds: 1, replyTimeoutMs: 800 });
+  await service.ready;
+  const room = await service.createRoom({ name: "提示词", autoDeliver: true,
+    members: [{ kind: "session", sessionId: "s1", alias: "甲" }] });
+  await service.send({ roomId: room.id, author: "human:me", authorKind: "human", text: "议题" });
+  const deadline = Date.now() + 2000;
+  while (!prompts.length && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 5));
+  const recorded = (await service.eventsFor(room.id)).filter((event) => event.type === "turn.prompt");
+  assert.equal(recorded.length, 1);
+  assert.equal(recorded[0].payload.memberSessionId, "s1");
+  assert.equal(recorded[0].payload.prompt, prompts[0].text);
+  assert.equal(recorded[0].payload.promptChars, prompts[0].text.length);
+  assert.match(recorded[0].payload.promptHash, /^[0-9a-f]{64}$/);
+});
+
 test("the tick reaches disk, so a restart resumes from it instead of replaying it", async () => {
   const directory = await mkdtemp(join(tmpdir(), "dcl-tick-"));
   const deliveries = [];
