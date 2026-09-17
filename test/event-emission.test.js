@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DshChatLocalService } from "../lib/room-store.js";
@@ -44,6 +44,14 @@ test("events are append-only: a replay of the same operation adds no second even
 
 test("a log write failure does not fail the send itself", async () => {
   const h = await harness();
-  await assert.doesNotReject(() => h.service.send({ roomId: h.room.id, author: "human:me", authorKind: "human", text: "仍然成功" }));
-  assert.equal(h.service.logHealth().failed >= 0, true);
+  // A regular file where the per-room log directory belongs makes every append
+  // fail, so the side channel cannot succeed by accident.
+  await writeFile(join(h.directory, "events"), "not a directory", "utf8");
+  let sent;
+  await assert.doesNotReject(async () => {
+    sent = await h.service.send({ roomId: h.room.id, author: "human:me", authorKind: "human", text: "仍然成功" });
+  });
+  assert.equal(h.service.logHealth().failed >= 1, true);
+  const messages = await h.service.messages(h.room.id);
+  assert.equal(messages.some((message) => message.id === sent.id && message.text === "仍然成功"), true);
 });
