@@ -545,7 +545,7 @@ git commit -m "feat: emit immutable message and delivery events from the write p
 - Consumes: Task 3 的 `#record`
 - Produces:
   - `room.tick: number`（单调、持久化、随 `STATE_VERSION` 15 引入，迁移时对旧房间初始化为 `0`）
-  - 事件 `turn.scheduled`，`payload = {rootMessageId, epoch, recipients: string[], order: "configured"}`
+  - 事件 `turn.scheduled`，`payload = {rootMessageId, epoch, recipients: string[], order: "configured", rotationStart: number, executed: string[]}`（`recipients` 是配置序输入；`rotationStart` 与本回合实际执行的 `executed` 顺序用于让该事件**单独**即可证明「第几步是谁」——这是本事件存在的理由。计算 `executed` 的纯运算必须提到 `#record` 之前，且不得改变调度行为）
 
 **为什么**：顺序目前按 `room.members` 配置序（这是我们已经做对的唯一可复现性要素），但它**没有被记录下来**。事后要证明「第 3 步是 B 而不是 C」，必须有这一条。
 
