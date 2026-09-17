@@ -30,7 +30,7 @@
 | `lib/event-log.js`（新建） | 事件信封、哈希链、序列化、路径推导、追加写入器。**纯函数 + 一个薄写入器**，不 import `room-store.js` |
 | `lib/room-store.js`（修改） | 在既有写入路径旁路发射事件；加 `room.tick`；记录调度顺序；记录注入块 |
 | `lib/room-export.js`（修改） | 快照增加事件段与配置哈希；新增**校验式导入** |
-| `lib/index.js`（修改） | `/health` 暴露日志健康计数；新增 `GET /rooms/:id/events` 与 `POST /rooms/:id/restore` |
+| `lib/index.js`（修改） | `/health` 暴露日志健康计数；新增 `GET /rooms/:id/snapshot` 与 `POST /rooms/:id/restore-from-snapshot`（**不能**用 `POST /rooms/:id/restore`：该路径已被「恢复软删除房间」占用，见 Task 6 的裁定 R26） |
 | `test/event-log.test.js`（新建） | 信封/哈希链/序列化/追加/损坏检测的单元测试 |
 | `test/event-emission.test.js`（新建） | 服务层事件发射的集成测试 |
 | `test/snapshot-restore.test.js`（新建） | 快照与恢复的往返测试 |
@@ -739,7 +739,7 @@ git commit -m "feat: record the exact per-turn prompt as the experiment's indepe
 
 **Files:**
 - Modify: `lib/room-export.js`（新增 `exportRunSnapshot` / `restoreFromSnapshot`）
-- Modify: `lib/index.js`（`GET /rooms/:id/snapshot`、`POST /rooms/:id/restore`）
+- Modify: `lib/index.js`（`GET /rooms/:id/snapshot`、`POST /rooms/:id/restore-from-snapshot` —— **不是** `/restore`，那条路径属于既有的「恢复软删除房间」路由，字面使用会破坏它，已在真实处理器上验证；裁定 R26）
 - Test: `test/snapshot-restore.test.js`
 
 **Interfaces:**
@@ -999,7 +999,9 @@ Expected: FAIL — `health.audit` 为 undefined
 1. `package.json` 第 3 行：`"version": "0.16.2-local.1"` → `"version": "0.16.3-local.1"`
 2. `package-lock.json`：顶层 `"version"`（第 3 行）与 `packages[""].version`（第 9 行）都改为 `0.16.3-local.1`
 3. `CHANGELOG.md`：顶部新增 `## [0.16.3-local.1] — 2026-09-17`（内容见下）
-4. `README.md`：**不用**改版本号（它只声明 DSH 兼容范围），但要补「已知边界」一条（见下）
+4. `README.md`：**不用**改插件版本号（它只声明 DSH 兼容范围），但要做两件事：
+   (a) 把「已知边界」里两处陈旧的**状态版本**改对：`README.md:145` 的「当前状态版本 **v14**」→ **v15**，`README.md:148` 的「旧版程序不能读取 v14」→ **v15**。（Task 4 的审查发现：**没有任何测试覆盖 README 的状态版本**，所以漏了就永远错着 —— 这条指令是唯一的保障。）
+   (b) 补一条「已知边界」，见下。
 
 Run: `node --test test/version-consistency.test.js`
 Expected: PASS。若漏改任一处，会以 `CHANGELOG 首条必须等于当前发布版本` 或 `锁文件必须记录同一版本` 明确报错。
