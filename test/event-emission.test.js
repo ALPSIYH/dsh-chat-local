@@ -279,8 +279,14 @@ test("a delivery event names the same delivery the prompt does, so the pair join
   await replyTo(h.service, call, "回复");
   const events = await waitFor(async () => {
     const found = await h.service.eventsFor(h.room.id);
-    return found.some((event) => event.type === "delivery.settled" && event.payload.status === "replied") ? found : undefined;
-  }, "the settled delivery");
+    const settled = found.find((event) => event.type === "delivery.settled" && event.payload.status === "replied");
+    const sent = found.find((event) => event.type === "delivery.sent");
+    const prompt = found.find((event) => event.type === "turn.prompt");
+    // Poll for every event this test joins, not only the first to appear: a
+    // snapshot that has the settle but not the send would otherwise be compared
+    // against an event that was never in it.
+    return settled && sent && prompt ? found : undefined;
+  }, "the prompt, the sent delivery and its settle");
   const prompt = events.find((event) => event.type === "turn.prompt");
   const sent = events.find((event) => event.type === "delivery.sent");
   const settled = events.find((event) => event.type === "delivery.settled" && event.payload.status === "replied");
@@ -289,6 +295,18 @@ test("a delivery event names the same delivery the prompt does, so the pair join
   // delivery it produced needs tick order plus member: an inference, not a join.
   assert.equal(sent.payload.deliveryId, prompt.payload.deliveryId);
   assert.equal(settled.payload.deliveryId, prompt.payload.deliveryId);
+});
+
+test("eventsFor never returns a snapshot missing an append that was already recorded", async () => {
+  const h = await harness();
+  // The delivery path records without awaiting the append, so it queues appends
+  // that a reader has no promise for. Twenty of them, issued and forgotten, then
+  // one read: a read that did not join the chain would return a prefix of them.
+  for (let index = 0; index < 20; index += 1) {
+    void h.service.eventLog.append(h.room.id, { type: "probe", actor: { kind: "system", id: "system" }, payload: { index } });
+  }
+  const events = await h.service.eventsFor(h.room.id);
+  assert.equal(events.filter((event) => event.type === "probe").length, 20);
 });
 
 test("a restart records an event for every in-flight delivery it recovers as failed", async (t) => {
@@ -321,8 +339,13 @@ test("a restart records an event for every in-flight delivery it recovers as fai
   assert.equal(recovered.length, 1);
   assert.equal(recovered[0].status, "failed");
   assert.equal(recovered[0].recoveryReason, "restart");
-  const settle = (await second.eventsFor(room.id))
-    .find((event) => event.type === "delivery.settled" && event.payload.deliveryId === recovered[0].id);
+  // Poll for the recovery event rather than reading once: if it is genuinely
+  // absent the failure names the missing event instead of a partial snapshot.
+  const events = await waitFor(async () => {
+    const found = await second.eventsFor(room.id);
+    return found.some((event) => event.type === "delivery.settled" && event.payload.deliveryId === recovered[0].id) ? found : undefined;
+  }, "the restart recovery event that explains the status change");
+  const settle = events.find((event) => event.type === "delivery.settled" && event.payload.deliveryId === recovered[0].id);
   // The status a restart recovers as failed is this experiment's dependent
   // variable, so the log must not leave it indistinguishable from a delivery
   // that genuinely settled.

@@ -73,6 +73,22 @@ test("a snapshot round-trips a room with its event log", async () => {
   await service.close();
 });
 
+test("a run snapshot never lags an append that was already recorded", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "dcl-snap-lag-"));
+  const service = await serviceAt(directory);
+  const room = await service.createRoom({ name: "快照", autoDeliver: false });
+  // A snapshot taken over a lagging chain would silently drop an experiment's
+  // events. These appends are issued the way the delivery path issues them —
+  // never awaited — and a single snapshot follows them.
+  for (let index = 0; index < 20; index += 1) {
+    void service.eventLog.append(room.id, { type: "probe", actor: { kind: "system", id: "system" }, payload: { index } });
+  }
+  const parsed = JSON.parse((await service.snapshotRun(room.id, "cfg")).content);
+  assert.equal(parsed.events.filter((event) => event.type === "probe").length, 20);
+  assert.deepEqual(verifyChain(parsed.events), { ok: true, brokenAt: null });
+  await service.close();
+});
+
 test("a tampered snapshot is rejected with a reason", async () => {
   const directory = await mkdtemp(join(tmpdir(), "dcl-snap-"));
   const service = await serviceAt(directory);
