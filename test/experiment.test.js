@@ -183,7 +183,14 @@ test("the whole source of the fingerprinted modules is part of the hash", () => 
   assert.notEqual(configHashOf({ ...config, source: `${base}0` }), configHashOf(config));
   // The list is the modules whose bytes decide the injected text, named, so a
   // new one has to be added deliberately rather than silently falling outside.
-  assert.deepEqual([...SOURCE_FINGERPRINT_MODULES], ["experiment.js"]);
+  assert.deepEqual([...SOURCE_FINGERPRINT_MODULES], ["experiment.js", "relationship.js"]);
+  // The derivation really is inside the fingerprinted text: `messagesAuthored`
+  // is incremented in `lib/relationship.js`, which no renderer function list can
+  // reach, so a `+= 1` to `+= 2` edit there used to change the rendered counters
+  // — and so the injected bytes — while the hash stood still.
+  const derivation = sources.find(([name]) => name === "relationship.js")?.[1] ?? "";
+  assert.match(derivation, /counters\.messagesAuthored \+= 1;/u,
+    "the counter derivation must be inside the fingerprinted bytes");
 });
 
 // --- the estimate and the dispersion -----------------------------------------
