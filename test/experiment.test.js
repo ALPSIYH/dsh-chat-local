@@ -14,7 +14,8 @@ import {
   RELATIONSHIP_DIGEST_CLAIM_MAX_CHARS, RELATIONSHIP_DIGEST_COUNTERS, RELATIONSHIP_DIGEST_COUNTER_TEMPLATE,
   RELATIONSHIP_DIGEST_HEADING, RELATIONSHIP_DIGEST_MAX_CHARS, RELATIONSHIP_DIGEST_STANCES,
   TOKEN_ESTIMATE_METHOD, configHashOf, dependentVariables, digestAlgorithmFingerprint, dispersion,
-  estimateTokens, hasInteraction, injectionConfigFor, runArm, runManifests, runSegments } from "../lib/experiment.js";
+  estimateTokens, hasInteraction, injectionConfigFor, runArm, runManifests, runSegments,
+  sourceFingerprint, sourceTexts, SOURCE_FINGERPRINT_MODULES } from "../lib/experiment.js";
 import { RELATIONSHIP_VERSION } from "../lib/relationship.js";
 import { EVAL_FORMAT, INSUFFICIENT_EXIT, evaluate, renderText } from "../scripts/relationship-eval.mjs";
 
@@ -81,7 +82,7 @@ test("the config hash ignores key order at every depth", () => {
   const first = injectionConfigFor({ room, appraisalDigest: true });
   const reordered = {
     gate: first.gate, appraisalDigest: first.appraisalDigest, version: first.version,
-    algorithm: first.algorithm, relationshipVersion: first.relationshipVersion,
+    algorithm: first.algorithm, source: first.source, relationshipVersion: first.relationshipVersion,
     templates: first.templates, stances: first.stances, counters: first.counters,
     headings: first.headings, claimMaxChars: first.claimMaxChars, maxChars: first.maxChars
   };
@@ -105,6 +106,7 @@ test("the config hash covers every injection term, and nothing else", () => {
     appraisalDigest: { ...base, appraisalDigest: false },
     version: { ...base, version: base.version + 1 },
     algorithm: { ...base, algorithm: `${base.algorithm}0` },
+    source: { ...base, source: `${base.source}0` },
     relationshipVersion: { ...base, relationshipVersion: base.relationshipVersion + 1 },
     headings: { ...base, headings: [base.headings[0], base.headings[1] + "。"] },
     counters: { ...base, counters: [...base.counters, ["newCounter", "新计数"]] },
@@ -125,6 +127,7 @@ test("the config hash covers every injection term, and nothing else", () => {
   assert.ok(base.templates.includes(RELATIONSHIP_DIGEST_COUNTER_TEMPLATE));
   assert.equal(base.version, INJECTION_CONFIG_VERSION);
   assert.equal(base.algorithm, digestAlgorithmFingerprint());
+  assert.equal(base.source, sourceFingerprint());
   assert.equal(base.relationshipVersion, RELATIONSHIP_VERSION);
 });
 
@@ -147,6 +150,40 @@ test("the rendering algorithm's own source is part of the hash", () => {
   const base = injectionConfigFor({ room: { policy: {} }, appraisalDigest: true });
   assert.equal(base.algorithm, digestAlgorithmFingerprint(DIGEST_RENDERERS));
   assert.notEqual(configHashOf({ ...base, algorithm: `${base.algorithm}0` }), configHashOf(base));
+});
+
+test("the whole source of the fingerprinted modules is part of the hash", () => {
+  // A function list is a narrowing lens, not the enforcement: it can only cover
+  // the functions on it. The fingerprint that closes the class is taken over the
+  // module sources themselves, so a changed byte anywhere in them — a helper a
+  // listed function started calling, or a line outside every listed function —
+  // moves it.
+  const base = sourceFingerprint();
+  assert.match(base, /^[0-9a-f]{64}$/u);
+  const sources = sourceTexts();
+  assert.ok(sources.length > 0);
+  for (const [name, text] of sources) {
+    assert.match(name, /^[A-Za-z0-9._-]+\.js$/u);
+    assert.ok(text.length > 0, `${name} must have been read`);
+  }
+  const [[name, source]] = sources;
+  // The module header is fingerprinted and it is outside every function
+  // `DIGEST_RENDERERS` names: the old list could not see an edit here at all.
+  assert.match(source, /Experiment scaffolding for the relational layer/u);
+  const edited = source.replace("Experiment scaffolding", "Experiment scaffolDing");
+  assert.notEqual(edited, source);
+  assert.notEqual(sourceFingerprint([[name, edited]]), base,
+    "an edit outside every listed function must still move the fingerprint");
+  // The name travels with the text, so a module moved between files cannot hash
+  // the same.
+  assert.notEqual(sourceFingerprint([["elsewhere.js", source]]), base);
+  // And the fingerprint is a real term of the hash, not decoration beside it.
+  const config = injectionConfigFor({ room: { policy: {} }, appraisalDigest: true });
+  assert.equal(config.source, base);
+  assert.notEqual(configHashOf({ ...config, source: `${base}0` }), configHashOf(config));
+  // The list is the modules whose bytes decide the injected text, named, so a
+  // new one has to be added deliberately rather than silently falling outside.
+  assert.deepEqual([...SOURCE_FINGERPRINT_MODULES], ["experiment.js"]);
 });
 
 // --- the estimate and the dispersion -----------------------------------------
