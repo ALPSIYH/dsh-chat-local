@@ -231,6 +231,33 @@ test("the ids a message, a ledger entry and an envelope carry are all citable ev
   } finally { await h.close(); }
 });
 
+test("a charter proposal id is citable through its ledger transition, and no charter.* event exists", async () => {
+  const h = await bootPlugin();
+  try {
+    const call = await h.schedule("请评估", ["s1"]);
+    await h.openTurn(call);
+    const source = await triggeringMessageId(h);
+    const baseRevision = (await h.tool("chat_memory").execute({ room: h.room.id }, h.exec("s1"))).profile.revision;
+    const proposal = await h.tool("chat_charter_propose").execute({ room: h.room.id,
+      baseRevision, charter: "每项判断附可定位依据。", reason: "登记用户要求",
+      sourceMessageIds: [source] }, h.exec("s1"));
+    const events = await h.events();
+    // The proposal's id reaches the log as the propose transition's `entryId` ...
+    assert.ok(events.some((event) => event.type === "ledger.transition"
+      && event.payload.entryId === proposal.id), "the propose transition carries the proposal id as its entryId");
+    // ... and no `charter.*` event exists, so a reader must not be taught that a
+    // `charter.*` proposalId is an id kind this log can carry. Nothing emits a
+    // `charter.*` event and no event payload in the log carries a `proposalId`:
+    // the notice that announces a proposal keeps it on the message object, which
+    // `#messageEvent` does not copy into the payload.
+    assert.deepEqual(events.filter((event) => String(event.type).startsWith("charter.")), []);
+    assert.deepEqual(events.filter((event) => event.payload && "proposalId" in event.payload), []);
+    const recorded = await h.tool("chat_appraise").execute({ room: h.room.id,
+      ...appraisal({ evidenceEventIds: [proposal.id, source] }) }, h.exec("s1"));
+    assert.deepEqual(recorded.evidenceEventIds, [proposal.id, source]);
+  } finally { await h.close(); }
+});
+
 test("stance and confidence bounds are refused rather than clamped or dropped", async () => {
   const h = await bootPlugin();
   try {

@@ -131,7 +131,7 @@ dsh plugin --profile web add link:/path/to/dsh-chat-local
 
 **A 覆盖层：带证据、可撤销的主观评价。** 成员可以对**同一房间的另一成员**（不能对自己）写下一条表态：立场 `trust` / `distrust` / `neutral`、把握 `confidence ∈ [0,1]`、以第一人称写下的 `claim`、可选的 `perceivedRole`，以及一组必填的**证据事件 id**。每条表态都在本房间的 `appraisal` 事件里留痕，字段包含 `observerId`、`aboutAgentId`、`stance`、`confidence`、`claim`、`perceivedRole`、`evidenceEventIds`、`validFrom`、`validTo`。
 
-- **证据必填且必须真实存在。** `evidenceEventIds` 至少一条，且每条都要能在本房间的事件日志里找到：事件信封自己的 `id`、一条 `message.created` 的 `messageId`、一次 `ledger.transition` 的 `entryId`，或一条 `charter.*` 事件的 `proposalId`。校验是**先读一次日志建集合、再按集合查**，不逐条扫日志。**只要有一条不存在，整次调用被拒**，不会静默丢弃它——静默丢弃等于记录一条与调用方不同的陈述。空证据同样被拒。
+- **证据必填且必须真实存在。** `evidenceEventIds` 至少一条，且每条都要能在本房间的事件日志里找到：事件信封自己的 `id`、一条 `message.created` 的 `messageId`，或一次 `ledger.transition` 的 `entryId`（章程提案的 id 就归在这一类：提案提交时会发出一条 `entryId` 等于提案 id 的 `ledger.transition`，`chat_memory` 里提案对象的 `id` 也是它；本插件没有任何地方发出 `charter.*` 事件，所以不存在以 `proposalId` 字段携带的提案 id）。校验是**先读一次日志建集合、再按集合查**，不逐条扫日志。**只要有一条不存在，整次调用被拒**，不会静默丢弃它——静默丢弃等于记录一条与调用方不同的陈述。空证据同样被拒。
 - **只对本房间成员、不对自己。** 两种情形都被拒绝：对不在房间里的人表态是对局外人的判断，对自己表态会让观察者这一维出现「不是一个人看另一个人」的对。
 - **越界的值是拒绝而不是夹取。** 立场不在闭集内、把握不是 `[0,1]` 内的有限数值（包括 `NaN`、字符串、布尔值）、`claim` 为空或超过 2000 字符，都会让整次调用被拒，而不是被悄悄取整或丢弃。
 - **撤销不是删除。** `revoke` 追加**一条新的 `appraisal` 事件**，重复被撤销的那条陈述并把 `validTo` 设成当前 tick；原记录**逐字节留在日志里**。投影只取有效区间 `[validFrom, validTo)` 内的最新状态，撤销之后该对投影为 `null`：键还在（这位成员确实对那位表态过），但**不再携带任何判断**——被撤销的那条 `claim` 不会作为「现行判断」回到任何人的提示词里。撤销必须指名当前生效的那条 `appraisal`（`appraisalId` 取自 `chat_relationships`），已被撤销的再撤一次会被拒；同一个 tick 里记录又撤销会被拒（那会声明一个空区间）。撤销之后可以重新记录一条新的表态，撤销不是给这一对立墓碑。
