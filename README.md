@@ -177,7 +177,7 @@ dsh plugin --profile web add link:/path/to/dsh-chat-local
 
 哈希**不覆盖**什么也要说清楚：它不覆盖房间日志本身。计数器是这份日志的函数，所以两次 run 按定义会注入不同的文本，而那正是实验要比较的东西。它给出的承诺是「同一份派生会不会被渲染成同一段文本」，而不是「两个 run 注入了相同的字节」。另一条残余是严格带来的：被指纹模块里连注释或排版改动都会改变哈希并因此把 run 分成两组——这是保守的方向（宁可不合并），代价是重排代码也会换组。哈希对键序不敏感：等价配置得到同一哈希。
 
-**升级会造成的断点，必须提前说明。** 「哈希覆盖哪些东西」本身也是会变的：上一轮把 `algorithm` 加进哈希，本轮把 `source` 加进哈希，两次都会让**所有既有的 `run.manifest`** 与新版本产生的 run 落入不同的组——即使注入的字节一字未变。所以跨这类升级的在跑实验**必须重开**：老 run 不会与新 run 被合并成一个结论，反之亦然。评测报告会在表头打印**本次构建**的三个指纹项（`version` / `algorithm` / `source` / `relationshipVersion`），并在 notes 里重复这条说明。manifest 只记录最终的 `configHash`，不记录这些项，所以报告打印的是当前构建的指纹而不是历史 run 的指纹：两组 `configHash` 不同时它能告诉你差异可能来自哪些项（也包括随房间而变的 `gate` 与 `appraisalDigest`），但不能替你还原老 run 的那一套。
+**升级会造成的断点，必须提前说明。** 「哈希覆盖哪些东西」本身也是会变的：上一轮把 `algorithm` 加进哈希，本轮把 `source` 加进哈希，两次都会让**所有既有的 `run.manifest`** 与新版本产生的 run 落入不同的组——即使注入的字节一字未变。所以跨这类升级的在跑实验**必须重开**：老 run 不会与新 run 被合并成一个结论，反之亦然。评测报告会在表头打印**本次构建**的四个指纹项（`version` / `algorithm` / `source` / `relationshipVersion`），并在 notes 里重复这条说明。manifest 只记录最终的 `configHash`，不记录这些项，所以报告打印的是当前构建的指纹而不是历史 run 的指纹：两组 `configHash` 不同时它能告诉你差异可能来自哪些项（也包括随房间而变的 `gate` 与 `appraisalDigest`），但不能替你还原老 run 的那一套。
 
 **两条臂。** `arm` 决定关系状态是否跨 episode 携带：`persistent`（没有 manifest 时的默认）累积；`reset_per_episode` 在**每一局开头**自动追加一条 `clear` 干预，`mechanism: "arm:reset_per_episode"`、`appliedBy: "arm"`，同样记录干预前的 counters，并记录它开启的是哪一局（`episodeId`，即那条根消息）。一局就是**一条根消息的整段回合序列**：投递失败后重试会让同一个根消息再跑一次回合，但那仍是同一局，不会再追加第二条 `clear`；只有新的一条 `run.manifest` 才开启新的一局。臂是从**房间自己的日志**读回来的（最近一条 `run.manifest`），不是进程设置：重启不会悄悄换臂，同一进程里的两个房间也可以处于不同臂。同一份交互在两条臂下这一回合的快照确实不同——`persistent` 带着上一回合的计数，`reset_per_episode` 从零开始。
 
