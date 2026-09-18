@@ -92,8 +92,11 @@ dsh plugin --profile web add link:/path/to/dsh-chat-local
 | `relationship.snapshot` | 某个回合排定时，各成员对彼此的关系计数器快照 |
 | `appraisal` | 某成员对另一成员的主观表态：立场、把握、他本人的说法、他自认的角色、所引证据的事件 id，以及这条表态的有效区间（`validFrom` / `validTo`）；撤销同样是一条 `appraisal`，只是把 `validTo` 设成当时的 tick |
 | `action_gate` | 一次被治理门拒绝的工具执行：工具名、判定、风险类别，以及判定所依据的计数器快照 |
+| `relationship.intervention` | 一次干预：动作与范围、**干预之前的 counters**、干预者（人类 `human`，或臂机制 `arm`）与 `mechanism` |
+| `run.manifest` | 一次 run 的固定配置：臂（`arm`）、运行时实际报告的模型、状态版本、起始 tick、注入配置哈希 |
+| `injection.cost` | 一次唤醒**实际注入**的关系摘要字符数与哈希、整条提示词长度，以及明确标注为估算的 token 数 |
 
-事件的追加**跟随着状态落盘**：`message.created`、`ledger.transition`、`member.*`、`relationship.snapshot` 都先进审计队列，由把对应状态写进磁盘的那次保存来 flush；那次保存失败，事件就留到下一次成功的保存，绝不会为一份没有落盘的 revision 或成员关系留下幻影记录。反过来，日志写入失败也不会让房间操作失败：它只计入健康计数，房间照常工作。
+事件的追加**跟随着状态落盘**：`message.created`、`ledger.transition`、`member.*`、`relationship.snapshot`、`delivery.sent` / `delivery.settled` 都先进审计队列，由把对应状态写进磁盘的那次保存来 flush；那次保存失败，事件就留到下一次成功的保存，绝不会为一份没有落盘的 revision、成员关系或投递状态留下幻影记录。另一类事件（`turn.scheduled`、`turn.prompt`、`injection.cost`、`relationship.intervention`）在追加时立即写入：它们描述的是已经落盘的 tick、已经构造好的提示词或实验自身的记录，不依赖一次尚未落盘的房间状态。`reset_per_episode` 臂在每个回合开头自动追加的那条干预必须走这条路径——该回合的快照与提示词都要读到它，它不能等到下一次保存才可见。反过来，日志写入失败也不会让房间操作失败：它只计入健康计数，房间照常工作。
 
 **离线校验。** `node scripts/verify-event-log.mjs <roomId> [--state <rooms.json>]` 打开状态目录（或它的副本），逐条重算 SHA-256 链并核对头部锚点，只读、不写入；链断、被改写或尾部被截断时以非零状态码退出并打印具体位置。这个脚本校验的是**磁盘上的日志**；运行中的插件不校验在线日志，`verifyChain` 在生产路径上只用于导入快照时的事件链校验。
 
@@ -151,7 +154,35 @@ dsh plugin --profile web add link:/path/to/dsh-chat-local
 
 日志读不出来（行损坏、尾部被截断、路径不可读）时这一回合没有摘要可注入，提示词**整段省略**它，不会留下一个空标题，协作与投递照常进行；同样地，一个对手方若没有任何非零计数，就不会有计数行；某成员若对所有对手方都既无非零计数也无现行判断，整段摘要都不出现。
 
-**尚未提供**：跨 run 的实验脚手架（干预 API、run manifest、评测脚本）。本版也不提供保留期、轮转或日志裁剪工具。
+### 实验脚手架
+
+关系层不只是给人看，也要能被当作实验跑。三件事让它可复现：把自变量写进日志、把「重置」变成可审计的事件、以及一个只读的评测脚本。
+
+**干预（人类独有的端点）。** `POST /api/dsh-chat-local/rooms/:id/relationship-intervention`，请求体 `{action: "set"|"clear"|"seed", observerId?, targetId?, counters?, appliedBy: "human", mechanism, note}`，写入一条 `relationship.intervention` 事件。语义是**开一个新的计数窗口**：`clear` 让被点名对象（不点名即全体）的十个计数器从该事件起归零，`set`/`seed` 还给出窗口的起始计数，只有该事件**之后**的事件才计入。`set` 与 `seed` 在派生上相同，区别是写法：`seed` 表示一局的初始条件。`observerId` 会被记录，但**不收窄作用范围**——计数器是对象的记录、在每个观察者那里都相同，所以按对象开窗才是完整的。`clear` 不带 `counters`；`set`/`seed` 必须带，且只需写要改的计数，未写的按 0 起算。
+
+事件记录**干预之前的 counters**（`countersBefore`，按对象），否则「重置了什么」不可复核。`clear` 是重置而不是删除：日志里全部既有事件与既有快照逐字节保留，投影只是从这条事件起读到新的计数。
+
+这个端点**只能由人类调用**，而且**不是**任何 `chat_*` 工具：
+
+- `appliedBy` 必须恰好是 `"human"`；其它值（包括缺省）一律以 403 拒绝并说明原因。
+- 房间内有任何成员正处于群聊回合中时，调用一律以 403 拒绝。一个 Agent 在自己的回合里清掉自己的计数，等于同时改写实验的自变量与因变量，事后无法修复；这是结构性拒绝，不是约定。
+- 非法输入一律带原因拒绝，不静默忽略：未知 `action`、缺 `mechanism`、非本房间成员、越界（负数或非整数）或未知的计数器名、`clear` 带 `counters`、未知字段。
+
+**run manifest。** `POST /api/dsh-chat-local/rooms/:id/run-manifest`，请求体 `{arm: "persistent"|"reset_per_episode", appliedBy: "human"}`，写入一条 `run.manifest` 事件：`{configHash, models, initialStateVersion, startedAtTick, arm}`。它同样是人类独有的，共用上面那一套守卫与拒绝规则。`models` 记录**运行时实际报告的** provider/model，读不到就记 `null`：这个 harness 的 `subagent` 工具没有 model 参数，插件也无法指定成员使用的模型，所以调用方提供的模型名不被接受（出现即拒绝）。
+
+`configHash` 覆盖**影响注入的全部配置**：注入上限（600 字符）、单个 `claim` 的引用上限、两条标题、计数器标签与顺序、立场标签、行模板，以及治理门开关 `room.policy.gate` 与判断部分的进程开关 `appraisalDigest`（插件配置项，默认开）。注入文本就是由这些常量拼出来的，`lib/experiment.js` 是它们的唯一来源，所以两个 `configHash` 相同的 run 注入的是同一段文本，而改了配置却哈希不变的情况不存在。哈希对键序不敏感：等价配置得到同一哈希。
+
+**两条臂。** `arm` 决定关系状态是否跨 episode 携带：`persistent`（没有 manifest 时的默认）累积；`reset_per_episode` 在**每个新回合一开头**自动追加一条 `clear` 干预，`mechanism: "arm:reset_per_episode"`、`appliedBy: "arm"`，同样记录干预前的 counters。臂是从**房间自己的日志**读回来的（最近一条 `run.manifest`），不是进程设置：重启不会悄悄换臂，同一进程里的两个房间也可以处于不同臂。同一份交互在两条臂下这一回合的快照确实不同——`persistent` 带着上一回合的计数，`reset_per_episode` 从零开始。
+
+**注入成本。** 每次唤醒成员，除了 `turn.prompt` 还会追加一条 `injection.cost`：`digestChars` 是**实际注入的那段摘要**的字符数（不是上限），`digestHash` 是它的 SHA-256，`promptChars` 是整条提示词的长度，另有 `estimatedTokens` 以及它明确标注为估算的算法（`tokenEstimateMethod`，`tokenEstimateExact: false`）和估算用到的码点计数。记录它不改变注入文本，也不改变 600 字符上限。
+
+**评测。** `node scripts/relationship-eval.mjs [--state <rooms.json>] [--room <id>] [--min-runs <n>] [--observation] [--json]` 只读地打开状态目录（或它的副本），按每个房间的 `run.manifest` 把日志切成 run，输出每个 run 的因变量与**分组后的均值、样本方差、标准差、最小值、最大值**。因变量是接手人选择分布、验收退回率、动作被拒次数、争议未解决时长（单位 tick）与注入字符数；每个定义都写在 `lib/experiment.js` 的 `dependentVariables` 里并注明从哪类事件读，复核者可以用日志自己重算。分组键是 `(arm, configHash, initialStateVersion, models)`：只有四项都相同的 run 才会被合并——配置不同却当成可比，结论就是错的。
+
+- **少于 10 个 run 不给结论。** 默认行为是：只打印每 run 的观察值、把该组标为样本不足、不打印任何跨 run 均值与方差，并以退出码 3 结束。`--observation` 是显式的「仅作观察」模式：打印描述统计并逐条标注「observation (not a conclusion)」，仍然不下结论，退出码 0。`--min-runs` 只能**调高**门槛，调低会被拒绝。
+- 时长一律用 **`tick`**，不用事件时间戳 `at`。`at` 在同一毫秒内每追加一条就 +1 ms 以保持严格递增，持续的程序化追加可以让它领先墙钟数秒，用它做差得到的是写入者的批次大小，而不是交互时长。
+- 脚本**不写任何东西**：只读日志与头部锚点。链校验不通过的日志会被拒绝分析并列入 `invalid`，而不是被当成数据集。
+
+**尚未提供**：保留期、轮转或日志裁剪工具。
 
 ### 章程自更新
 
