@@ -30,7 +30,9 @@ export declare class DshChatLocalService {
   messageContext(roomId: string, messageId: string, radius?: number): Promise<any[]>;
   searchMessages(roomId: string, input?: any): Promise<any[]>;
   relationships(roomId: string): Promise<Record<string, Record<string, any>>>;
+  appraisals(roomId: string): Promise<Record<string, Record<string, any>>>;
   relationshipRow(roomId: string, sessionId: string): Promise<any>;
+  appraise(roomId: string, sessionId: string, input: any): Promise<any>;
   /**
    * Wait until the audit appends this service already owes have reached the log,
    * then report the log's health. It joins only work already issued: it never
