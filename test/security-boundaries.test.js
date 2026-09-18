@@ -66,6 +66,27 @@ test('a restricted group turn cannot read the group state file or reach a local 
   assert.match(h.service.guardToolExecution(exec('bash', { command: 'echo x' })), /Host 已拒绝非只读工具/);
 });
 
+test('a restricted group turn refuses a tool whose name merely starts with a read verb', async () => {
+  const h = await harness();
+  const room = await h.room();
+  await h.service.send({ roomId: room.id, author: 'human:me', authorKind: 'human', text: '开始' });
+  await waitFor(() => h.calls.length === 1);
+  await h.activate(h.calls[0]);
+  const exec = (name, args) => ({ name, arguments: args, agent: { session: { id: 's1' } } });
+  // The allowlist is exact names, so a name that only *begins* with a read verb
+  // inherits nothing from it. A future list_/get_/search_/query_ tool may well
+  // mutate state, so it must be refused until it is deliberately listed.
+  for (const name of ['list_things', 'get_secret', 'search_all', 'query_db']) {
+    assert.match(h.service.guardToolExecution(exec(name, { room: room.id })),
+      /Host 已拒绝非只读工具/, `${name} must not be read-only by prefix`);
+  }
+  // The concrete names the previous prefix regex allowed keep their treatment:
+  // refusing them here would be a capability change this fix must not make.
+  for (const name of ['read_file', 'read_image', 'list_agents', 'get_goal']) {
+    assert.equal(h.service.guardToolExecution(exec(name, {})), undefined, `${name} was allowed before and stays allowed`);
+  }
+});
+
 test('updating only the charter keeps the room purpose', async () => {
   const h = await harness();
   const room = await h.service.createRoom({ name: '章程', autoDeliver: false,
