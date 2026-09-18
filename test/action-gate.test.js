@@ -392,6 +392,73 @@ test("the policy endpoint carries the gate switch and tells the room about it", 
   }
 });
 
+/**
+ * The policy notice is a fact in the room's timeline, so it has to state the
+ * change that happened and nothing else. The call can move the mode, the gate,
+ * both, or neither — re-applying a native preset to a room already in that mode
+ * changes no permission — and a reader of the timeline must be able to trust
+ * each of those four statements.
+ */
+test("the policy notice states what changed, and a re-applied preset claims no change at all", async () => {
+  const h = await harness("公告");
+  // A bridge whose native presets can actually be applied, so the preset path
+  // runs rather than failing on a missing permission service.
+  const presets = new Map([["s1", "workspace-write"]]);
+  const agent = { session: { id: "s1" }, status: "idle" };
+  h.ctx.agents = { get: (id) => (id === "s1" ? agent : undefined) };
+  h.ctx.permissionPresets = {
+    names: ["workspace-write", "danger-full-access"],
+    resolve: (name) => ({ sandbox: name, approval: name === "danger-full-access" ? "never" : "ask" }),
+    current: (session) => presets.get(session.id),
+    set(session, name) { presets.set(session.id, name); }
+  };
+  /** The notice the last policy call left in the room's own timeline. */
+  const notice = () => h.service.state.rooms.find((room) => room.id === h.room.id).messages
+    .filter((message) => message.author === "system:policy").at(-1).text;
+  try {
+    const first = await h.service.resolveRoom(h.room.id);
+    // 1. The gate alone: the mode is untouched, so the notice is about the gate.
+    await h.service.setRoomPolicy(h.room.id, { defaultActionMode: first.policy.defaultActionMode,
+      expectedRevision: first.policy.revision, gate: true });
+    const gateOnly = await notice();
+    assert.match(gateOnly, /开启.*行动治理门/);
+    assert.doesNotMatch(gateOnly, /切换为/, "a mode that did not move is not announced");
+
+    // 2. The mode alone: the gate stays on and the notice is about the mode.
+    const on = await h.service.resolveRoom(h.room.id);
+    await h.service.setRoomPolicy(h.room.id, { defaultActionMode: "inherit_dsh",
+      expectedRevision: on.policy.revision, confirmRisk: true });
+    const modeOnly = await notice();
+    assert.match(modeOnly, /将房间权限切换为 inherit_dsh/);
+    assert.doesNotMatch(modeOnly, /行动治理门/, "a gate that did not move is not announced");
+    assert.equal((await h.service.resolveRoom(h.room.id)).policy.gate, true);
+
+    // 3. Both at once: both changes are stated, and neither is dropped.
+    const moved = await h.service.resolveRoom(h.room.id);
+    await h.service.setRoomPolicy(h.room.id, { defaultActionMode: "workspace_write",
+      expectedRevision: moved.policy.revision, confirmRisk: true, gate: false });
+    const both = await notice();
+    assert.match(both, /将房间权限切换为 workspace_write/);
+    assert.match(both, /关闭.*行动治理门/);
+    assert.equal((await h.service.resolveRoom(h.room.id)).policy.gate, undefined);
+
+    // 4. The same native preset re-applied: nothing changed, so the notice must
+    //    not claim that the gate — or the mode — changed.
+    const reappliedBefore = await h.service.resolveRoom(h.room.id);
+    const reapplied = await h.service.setRoomPolicy(h.room.id, { defaultActionMode: "workspace_write",
+      expectedRevision: reappliedBefore.policy.revision, confirmRisk: true });
+    assert.equal(reapplied.policy.defaultActionMode, "workspace_write");
+    assert.equal(reapplied.policy.gate, undefined);
+    const presetOnly = await notice();
+    assert.doesNotMatch(presetOnly, /行动治理门/, "a gate that did not move must not be announced as moving");
+    assert.doesNotMatch(presetOnly, /开启|关闭了本房间的行动治理门/, "and must not be announced as being switched");
+    assert.match(presetOnly, /重新应用/, "the notice says the preset was re-applied");
+    assert.equal(reapplied.policy.revision, reappliedBefore.policy.revision + 1);
+  } finally {
+    await h.close();
+  }
+});
+
 test("with the gate off, a whole turn behaves exactly as it did before the gate existed", async () => {
   const { h, lock } = await gatedTurn();
   try {
@@ -464,19 +531,6 @@ test("the gate-off turn holds its exact recorded sequence across repeated loaded
   assert.deepEqual([...sequences], [PRE_GATE_EVENT_TYPES.join(",")]);
 });
 
-/**
- * The ordering the lock above depends on, pinned on its own.
- *
- * `delivery.sent` is written for the delivery a `queued` member has just been
- * handed, and only a save that still finds the delivery in that status records
- * it. When the member's turn arrives before that save has run, the delivery has
- * already moved on to `delivered`, and the room states the transition it now
- * holds rather than one it has left. That is not a claim about the gate — it is
- * what the delivery path did before the gate existed — but it is why the lock
- * has to reach its read point in the room's order instead of at whatever moment
- * a reader happens to arrive, and it is the state the gate's counters are read
- * from, so it is worth holding still.
- */
 test("turning the gate on only adds refusals, and never rewrites one that already held", async () => {
   const { h, lock } = await gatedTurn();
   try {
