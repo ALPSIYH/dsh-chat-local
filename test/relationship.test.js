@@ -740,6 +740,24 @@ test("input the projection cannot interpret is refused rather than guessed at", 
   assert.throws(() => latestRelationships([], ""), TypeError);
 });
 
+test("an action_gate event is not evidence for any counter", () => {
+  // The gate reads these counters and, when it refuses an execution, writes an
+  // event into the same log they are derived from. An event type the derivation
+  // does not name has to stay external to it: if the gate's own refusals moved
+  // the counters, what it judges would depend on what it had already refused.
+  const base = log();
+  const before = deriveRelationships({ events: base, roomId: ROOM });
+  const gateEvent = event({ id: "g1", type: "action_gate", actor: "session:r1", tick: 8, at: 25,
+    payload: { tool: "bash", judgement: "require_confirmation", riskClass: "high", action: "execute",
+      basis: { observer: "r1", target: "r1", asOfTick: 8, version: 1, derivedFromCount: 0,
+        counters: { deliveryFailures: 0, deliverySuccesses: 1, unresolvedDisagreements: 1 } } } });
+  const after = deriveRelationships({ events: [...base, gateEvent], roomId: ROOM });
+  assert.deepEqual(after, before);
+  // The fixture must carry real counters: "nothing changed" proves nothing on a
+  // log of zeros.
+  assert.ok(Object.values(countersFor(after, "r1", "r1")).some((value) => value > 0));
+});
+
 /**
  * The read-only surfaces: `GET /rooms/:id/relationships` and the
  * `chat_relationships` tool.
