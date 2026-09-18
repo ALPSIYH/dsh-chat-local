@@ -1,0 +1,180 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { DshChatLocalService } from "../lib/room-store.js";
+
+/**
+ * The gate's wiring into the tool guard: what the guard does with a judgement,
+ * and what it records. The judgement itself is pinned in `gate.test.js`; here the
+ * question is whether the room's own state reaches it, whether a refusal is
+ * visible in the log afterwards, and whether anything is recorded when the gate
+ * allows.
+ */
+
+async function waitFor(predicate, label) {
+  const deadline = Date.now() + 3_000;
+  while (Date.now() < deadline) {
+    const value = await predicate();
+    if (value) return value;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`timed out waiting for ${label}`);
+}
+
+/**
+ * One service over a temporary state directory, with a bridge that can be made
+ * to fail: a delivery that never arrives is what leaves the member with failed
+ * deliveries and no successful one, which is the record the gate reads.
+ */
+async function harness() {
+  const directory = await mkdtemp(join(tmpdir(), "dcl-action-gate-"));
+  const calls = [];
+  let failing = false;
+  const ctx = {
+    agents: { get: () => undefined },
+    dshBridge: { status: async () => ({ state: "idle" }),
+      deliverExternal: async (from, to, text, delivery) => {
+        if (failing) throw new Error("dsh-bridge refused the delivery");
+        calls.push({ from, to, text, delivery });
+      } },
+    get(name) { return this[name]; }
+  };
+  const service = new DshChatLocalService(ctx, { path: join(directory, "rooms.json"), replyTimeoutMs: 5_000 });
+  await service.ready;
+  const room = await service.createRoom({ name: "行动治理门", autoDeliver: true,
+    members: [{ kind: "session", sessionId: "s1", alias: "甲" }] });
+  const state = () => service.state.rooms.find((item) => item.id === room.id);
+  return {
+    service, room, calls,
+    setFailing: (value) => { failing = value; },
+    /** The room's live policy. The gate flag is read from here on every execution. */
+    enableGate: () => { state().policy.gate = true; },
+    setSample: (pairs) => { service.relationshipSamples.set(room.id, { asOfTick: state().tick, version: 1,
+      derivedFromCount: 0, pairs }); },
+    events: () => service.eventsFor(room.id),
+    idle: async () => (await service.resolveRoom(room.id)).orchestration?.state === "idle",
+    /** Open a member's turn the way DSH reports it, and leave it open. */
+    openTurn: async (call) => {
+      await service.observeSessionEvent(call.to, { type: "turn/start", data: { turn: 1 } });
+      await service.observeSessionEvent(call.to, { type: "user/message", data: { content: [{ type: "text",
+        text: `[dsh-bridge dsh-chat-local-room message ${call.delivery.id} from room:${room.id}]` }] } });
+    },
+    close: async () => { await service.close(); await rm(directory, { recursive: true, force: true }); }
+  };
+}
+
+/** An execution as DSH reports it to the guard. */
+const exec = (name, args = {}) => ({ name, arguments: args, agent: { session: { id: "s1" } } });
+
+test("a refusal carries the judgement that caused it and is recorded with the counters behind it", async () => {
+  const h = await harness();
+  try {
+    // An execution-mode policy is where the gate lives: a restricted turn is
+    // already decided by the read-only rules above it, and the gate never
+    // loosens those.
+    await h.service.setRoomPolicy(h.room.id, { defaultActionMode: "inherit_dsh", expectedRevision: 1, confirmRisk: true });
+    // Turn one cannot reach 甲 at all.
+    h.setFailing(true);
+    await h.service.send({ roomId: h.room.id, author: "human:me", authorKind: "human", text: "第一轮" });
+    await waitFor(async () => (await h.events()).some((event) => event.type === "delivery.settled"
+      && event.payload.status === "failed"), "the failed delivery");
+    await waitFor(() => h.idle(), "the first turn to end");
+    h.setFailing(false);
+    // Turn two reaches them, so the record the gate reads is the one turn one left.
+    await h.service.send({ roomId: h.room.id, author: "human:me", authorKind: "human", text: "第二轮" });
+    const call = await waitFor(() => h.calls.at(-1), "the second delivery");
+    await h.openTurn(call);
+    h.enableGate();
+    const before = await h.events();
+    const snapshot = before.filter((event) => event.type === "relationship.snapshot").at(-1);
+    const self = snapshot.payload.pairs.find((pair) => pair.observer === "s1" && pair.target === "s1");
+    assert.equal(self.counters.deliveryFailures, 1, "the fixture must leave a failed delivery behind");
+    assert.equal(self.counters.deliverySuccesses, 0, "and no successful one");
+
+    const denial = h.service.guardToolExecution(exec("bash", { command: "rm -rf build" }));
+    assert.equal(typeof denial, "string", "the guard refuses by returning a reason");
+    assert.match(denial, /治理门/);
+    assert.match(denial, /用户/);
+    // The guard cannot ask the user anything, so the refusal must say so and
+    // must not leave the member waiting for an approval that will never come.
+    assert.match(denial, /无法弹出审批/);
+    assert.doesNotMatch(denial, /等待.*(?:批准|审批)|已提交.*审批/);
+    // A low-impact read is not what the confirmation rule is for.
+    assert.equal(h.service.guardToolExecution(exec("read", { path: "/tmp/notes.txt" })), undefined);
+
+    const recorded = (await h.events()).find((event) => event.type === "action_gate");
+    assert.ok(recorded, "a refusal is recorded, not merely intended");
+    assert.equal(recorded.payload.judgement, "require_confirmation");
+    assert.equal(recorded.payload.tool, "bash");
+    assert.equal(recorded.payload.riskClass, "high");
+    assert.equal(recorded.payload.action, "execute");
+    // `basis` is the counter snapshot the judgement was taken on: the same pair
+    // and the same numbers the turn's own relationship snapshot states.
+    assert.deepEqual(recorded.payload.basis, { observer: "s1", target: "s1",
+      asOfTick: snapshot.payload.asOfTick, version: snapshot.payload.version,
+      derivedFromCount: snapshot.payload.derivedFromCount, counters: { ...self.counters } });
+    assert.equal(recorded.provenance.roomId, h.room.id);
+    assert.equal(recorded.provenance.actorId, "s1");
+  } finally {
+    await h.close();
+  }
+});
+
+test("an allowed execution records nothing", async () => {
+  const h = await harness();
+  try {
+    await h.service.setRoomPolicy(h.room.id, { defaultActionMode: "inherit_dsh", expectedRevision: 1, confirmRisk: true });
+    h.enableGate();
+    h.setSample([{ observer: "s1", target: "s1", tick: 1,
+      counters: { deliveryFailures: 2, deliverySuccesses: 0, unresolvedDisagreements: 0 } }]);
+    h.service.policyLocks.set("s1", { active: true, roomId: h.room.id, actionMode: "inherit_dsh",
+      expiresAt: Date.now() + 10_000 });
+    const before = JSON.stringify((await h.events()).map((event) => event.type));
+    assert.equal(h.service.guardToolExecution(exec("read", { path: "/tmp/notes.txt" })), undefined);
+    assert.equal(h.service.guardToolExecution(exec("chat_memory", { room: h.room.id })), undefined);
+    assert.equal(JSON.stringify((await h.events()).map((event) => event.type)), before,
+      "the gate observes only what it refuses");
+  } finally {
+    await h.close();
+  }
+});
+
+test("with the gate off, the same low-trust record lets the same execution through and records nothing", async () => {
+  const h = await harness();
+  try {
+    await h.service.setRoomPolicy(h.room.id, { defaultActionMode: "inherit_dsh", expectedRevision: 1, confirmRisk: true });
+    // Exactly the record that is refused above, with the gate left alone.
+    h.setSample([{ observer: "s1", target: "s1", tick: 1,
+      counters: { deliveryFailures: 2, deliverySuccesses: 0, unresolvedDisagreements: 1 } }]);
+    h.service.policyLocks.set("s1", { active: true, roomId: h.room.id, actionMode: "inherit_dsh",
+      expiresAt: Date.now() + 10_000 });
+    const before = (await h.events()).length;
+    assert.equal(h.service.guardToolExecution(exec("bash", { command: "rm -rf build" })), undefined);
+    assert.equal(h.service.guardToolExecution(exec("read", {})), undefined);
+    assert.equal((await h.events()).length, before);
+  } finally {
+    await h.close();
+  }
+});
+
+test("a stale or ambiguous lock still returns before the gate is consulted", async () => {
+  const h = await harness();
+  try {
+    await h.service.setRoomPolicy(h.room.id, { defaultActionMode: "inherit_dsh", expectedRevision: 1, confirmRisk: true });
+    h.enableGate();
+    h.setSample([{ observer: "s1", target: "s1", tick: 1,
+      counters: { deliveryFailures: 2, deliverySuccesses: 0, unresolvedDisagreements: 1 } }]);
+    // The shape DSH leaves behind when it coalesces two deliveries into one turn.
+    h.service.policyLocks.set("s1", { active: true, roomId: h.room.id, actionMode: "discuss_only",
+      stale: true, ambiguous: true, expiresAt: Date.now() + 10_000 });
+    const before = (await h.events()).length;
+    const denial = h.service.guardToolExecution(exec("bash", {}));
+    assert.match(denial, /失效|超时/, "the stale lock's own refusal decides first");
+    assert.doesNotMatch(denial, /治理门/);
+    assert.equal((await h.events()).length, before, "a lock the gate never reached records nothing");
+  } finally {
+    await h.close();
+  }
+});
