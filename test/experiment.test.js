@@ -8,11 +8,13 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { EventLog } from "../lib/event-log.js";
 import {
-  DEPENDENT_VARIABLE_VERSION, INJECTION_CONFIG_VERSION, MIN_RUNS, RELATIONSHIP_DIGEST_APPRAISAL_HEADING,
+  DEPENDENT_VARIABLE_VERSION, DIGEST_RENDERERS, INJECTION_CONFIG_VERSION, MIN_RUNS,
+  RELATIONSHIP_DIGEST_APPRAISAL_HEADING,
   RELATIONSHIP_DIGEST_CLAIM_MAX_CHARS, RELATIONSHIP_DIGEST_COUNTERS, RELATIONSHIP_DIGEST_COUNTER_TEMPLATE,
   RELATIONSHIP_DIGEST_HEADING, RELATIONSHIP_DIGEST_MAX_CHARS, RELATIONSHIP_DIGEST_STANCES,
-  TOKEN_ESTIMATE_METHOD, configHashOf, dependentVariables, dispersion, estimateTokens,
-  injectionConfigFor, runArm, runManifests, runSegments } from "../lib/experiment.js";
+  TOKEN_ESTIMATE_METHOD, configHashOf, dependentVariables, digestAlgorithmFingerprint, dispersion,
+  estimateTokens, injectionConfigFor, runArm, runManifests, runSegments } from "../lib/experiment.js";
+import { RELATIONSHIP_VERSION } from "../lib/relationship.js";
 import { EVAL_FORMAT, INSUFFICIENT_EXIT, evaluate, renderText } from "../scripts/relationship-eval.mjs";
 
 /**
@@ -78,6 +80,7 @@ test("the config hash ignores key order at every depth", () => {
   const first = injectionConfigFor({ room, appraisalDigest: true });
   const reordered = {
     gate: first.gate, appraisalDigest: first.appraisalDigest, version: first.version,
+    algorithm: first.algorithm, relationshipVersion: first.relationshipVersion,
     templates: first.templates, stances: first.stances, counters: first.counters,
     headings: first.headings, claimMaxChars: first.claimMaxChars, maxChars: first.maxChars
   };
@@ -100,6 +103,8 @@ test("the config hash covers every injection term, and nothing else", () => {
     gate: { ...base, gate: true },
     appraisalDigest: { ...base, appraisalDigest: false },
     version: { ...base, version: base.version + 1 },
+    algorithm: { ...base, algorithm: `${base.algorithm}0` },
+    relationshipVersion: { ...base, relationshipVersion: base.relationshipVersion + 1 },
     headings: { ...base, headings: [base.headings[0], base.headings[1] + "。"] },
     counters: { ...base, counters: [...base.counters, ["newCounter", "新计数"]] },
     stances: { ...base, stances: [...base.stances, ["unsure", "不确定"]] },
@@ -118,6 +123,29 @@ test("the config hash covers every injection term, and nothing else", () => {
   assert.deepEqual(base.stances, RELATIONSHIP_DIGEST_STANCES.map((entry) => [...entry]));
   assert.ok(base.templates.includes(RELATIONSHIP_DIGEST_COUNTER_TEMPLATE));
   assert.equal(base.version, INJECTION_CONFIG_VERSION);
+  assert.equal(base.algorithm, digestAlgorithmFingerprint());
+  assert.equal(base.relationshipVersion, RELATIONSHIP_VERSION);
+});
+
+test("the rendering algorithm's own source is part of the hash", () => {
+  // The configurable terms are data and were always hashed; the algorithm that
+  // consumes them is code, and its literals — the truncation ellipsis, the
+  // `"\n"` joins, the label-fold pattern — are what a term change could not
+  // reach. This is the mechanism that reaches them: every renderer's own source
+  // text is fingerprinted, so editing one changes the hash.
+  const first = digestAlgorithmFingerprint([function renderer() { return "与「甲」：发言 1"; }]);
+  const second = digestAlgorithmFingerprint([function renderer() { return "与「甲」: 发言 1"; }]);
+  assert.notEqual(first, second, "a changed rendering literal must change the fingerprint");
+  assert.equal(first, digestAlgorithmFingerprint([function renderer() { return "与「甲」：发言 1"; }]));
+  assert.match(first, /^[0-9a-f]{64}$/u);
+  // The list is the whole rendering path, named, so a function added to the
+  // algorithm without being listed here is a failure rather than a silent hole.
+  assert.deepEqual(DIGEST_RENDERERS.map((renderer) => renderer.name).sort(),
+    ["digestAppraisalLine", "digestLabel", "digestRank", "fillTemplate", "positiveCount", "relationshipDigest", "renderDigest"]);
+  // And the fingerprint is a real term of the hash, not decoration beside it.
+  const base = injectionConfigFor({ room: { policy: {} }, appraisalDigest: true });
+  assert.equal(base.algorithm, digestAlgorithmFingerprint(DIGEST_RENDERERS));
+  assert.notEqual(configHashOf({ ...base, algorithm: `${base.algorithm}0` }), configHashOf(base));
 });
 
 // --- the estimate and the dispersion -----------------------------------------

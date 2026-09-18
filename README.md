@@ -166,7 +166,9 @@ dsh plugin --profile web add link:/path/to/dsh-chat-local
 
 **run manifest。** `POST /api/dsh-chat-local/rooms/:id/run-manifest`，请求体 `{arm: "persistent"|"reset_per_episode", appliedBy: "human"}`，写入一条 `run.manifest` 事件：`{configHash, models, initialStateVersion, startedAtTick, arm}`。它同样**不注册为工具**，并共用上面那一套守卫与拒绝规则（`appliedBy` 与「回合中拒绝」）。`models` 记录**运行时实际报告的** provider/model，读不到就记 `null`：这个 harness 的 `subagent` 工具没有 model 参数，插件也无法指定成员使用的模型，所以调用方提供的模型名不被接受（出现即拒绝）。
 
-`configHash` 覆盖**影响注入的全部配置**：注入上限（600 字符）、单个 `claim` 的引用上限、两条标题、计数器标签与顺序、立场标签、行模板，以及治理门开关 `room.policy.gate` 与判断部分的进程开关 `appraisalDigest`（插件配置项，默认开）。注入文本就是由这些常量拼出来的，`lib/experiment.js` 是它们的唯一来源，所以两个 `configHash` 相同的 run 注入的是同一段文本，而改了配置却哈希不变的情况不存在。哈希对键序不敏感：等价配置得到同一哈希。
+`configHash` 覆盖**影响注入文本的每一项**：注入上限（600 字符）、单个 `claim` 的引用上限、两条标题、计数器标签与顺序、立场标签、行模板、治理门开关 `room.policy.gate`、判断部分的进程开关 `appraisalDigest`（插件配置项，默认开）、计数器派生版本 `RELATIONSHIP_VERSION`，以及**渲染算法本身**。算法由两项表示：`INJECTION_CONFIG_VERSION`（人写的版本号）与 `algorithm`（把上面这些常量拼成文本的那组函数**源码文本**的 SHA-256）。常量、模板与渲染代码现在是同一处来源（`lib/experiment.js`）：改动其中任何一项——限长、标题、标签、顺序、模板、任一开关、派生版本、截断省略号、行分隔符、标签折叠正则、保留哪些行——都会改变哈希。所以「两个 `configHash` 相同的 run，对同一份派生会渲染出同一段文本」现在是被代码强制的，不再靠约定；改算法时仍应抬高 `INJECTION_CONFIG_VERSION`，它的作用是**命名**这次改动：哈希查出改动，版本号说明它是有意做的。
+
+哈希**不覆盖**什么也要说清楚：它不覆盖房间日志本身。计数器是这份日志的函数，所以两次 run 按定义会注入不同的文本，而那正是实验要比较的东西。它给出的承诺是「同一份派生会不会被渲染成同一段文本」，而不是「两个 run 注入了相同的字节」。另一条残余是严格带来的：算法函数里连注释或排版改动都会改变哈希并因此把 run 分成两组——这是保守的方向（宁可不合并），代价是重排代码也会换组。哈希对键序不敏感：等价配置得到同一哈希。
 
 **两条臂。** `arm` 决定关系状态是否跨 episode 携带：`persistent`（没有 manifest 时的默认）累积；`reset_per_episode` 在**每个新回合一开头**自动追加一条 `clear` 干预，`mechanism: "arm:reset_per_episode"`、`appliedBy: "arm"`，同样记录干预前的 counters，并记录它开启的是哪一局（`episodeId`，即那条根消息）。一局就是**一条根消息的整段回合序列**：投递失败后重试会让同一个根消息再跑一次回合，但那仍是同一局，不会再追加第二条 `clear`；只有新的一条 `run.manifest` 才开启新的一局。臂是从**房间自己的日志**读回来的（最近一条 `run.manifest`），不是进程设置：重启不会悄悄换臂，同一进程里的两个房间也可以处于不同臂。同一份交互在两条臂下这一回合的快照确实不同——`persistent` 带着上一回合的计数，`reset_per_episode` 从零开始。
 
