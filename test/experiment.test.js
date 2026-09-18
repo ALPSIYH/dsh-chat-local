@@ -637,6 +637,26 @@ test("the script is read-only: the state directory is byte-identical afterwards"
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
+test("the report names the fingerprints this build hashes a config with", async () => {
+  const { directory, statePath } = await stateWithRuns(1);
+  try {
+    const report = await evaluate({ statePath, observation: true });
+    // A manifest records only the resulting hash, so the terms are the context
+    // that lets an operator see why two groups' hashes differ.
+    assert.equal(report.currentConfig.version, INJECTION_CONFIG_VERSION);
+    assert.equal(report.currentConfig.algorithm, digestAlgorithmFingerprint());
+    assert.equal(report.currentConfig.source, sourceFingerprint());
+    assert.equal(report.currentConfig.relationshipVersion, RELATIONSHIP_VERSION);
+    const text = renderText(report);
+    assert.match(text, /current config {2}version 1 {2}algorithm [0-9a-f]{12}…/u);
+    assert.match(text, /source [0-9a-f]{12}… {2}relationshipVersion 1/u);
+    // And the upgrade discontinuity is disclosed where the operator will read it:
+    // a change to what the hash covers splits pre-existing manifests from new
+    // runs even when the injected bytes are unchanged.
+    assert.ok(report.notes.some((note) => /splits pre-existing manifests/u.test(note)));
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
 test("runs are pooled only when their configuration matches, and a broken chain is refused", async () => {
   const directory = await mkdtemp(join(tmpdir(), "dcl-eval-mixed-"));
   const statePath = join(directory, "rooms.json");

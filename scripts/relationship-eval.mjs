@@ -6,7 +6,17 @@
  * copy of it), splits each room's log into runs at its `run.manifest` events,
  * and reports each run's dependent variables plus the cross-run dispersion of
  * every group of runs whose configuration is identical. It never writes: it
- * reads the logs and their head anchors, and nothing else.
+ * reads the logs, their head anchors, and — so the report can name the
+ * fingerprints this build hashes a config with — the plugin's own fingerprinted
+ * source modules.
+ *
+ * A manifest records the resulting `configHash`, not the terms behind it, so the
+ * report prints this build's fingerprint terms as context: two groups whose
+ * hashes differ differed in one of them (or in the gate / `appraisalDigest`
+ * terms, which depend on the room at the time). Note that a change to *what* the
+ * hash covers splits every pre-existing manifest from post-upgrade runs even
+ * when the injected bytes are unchanged, so an in-flight experiment has to
+ * restart after such an upgrade.
  *
  * Two rules are script behaviour rather than advice, because both were learned
  * the expensive way:
@@ -54,7 +64,7 @@ import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { EventLog, eventLogPath, verifyChain } from "../lib/event-log.js";
 import { MIN_RUNS, DEPENDENT_VARIABLE_VERSION, dependentVariables, dispersion, hasInteraction,
-  runSegments } from "../lib/experiment.js";
+  injectionConfigFor, runSegments } from "../lib/experiment.js";
 
 const USAGE = "usage: node scripts/relationship-eval.mjs [--state <rooms.json>] [--room <roomId>] [--min-runs <n>] [--observation] [--json]";
 export const EVAL_FORMAT = "dsh-chat-local-relationship-eval";
@@ -246,11 +256,19 @@ export async function evaluate({ statePath, roomId, minRuns = MIN_RUNS, observat
   const groups = groupsOf(runs, minRuns, observation);
   const concluded = groups.filter((group) => group.sufficient);
   const status = concluded.length > 0 ? "conclusive" : (observation ? "observation" : "insufficient-sample");
+  // The fingerprint terms this build hashes a config with. A manifest records
+  // only the resulting `configHash`, so these are the context an operator needs
+  // to see *why* two groups' hashes differ — and to recognise an upgrade that
+  // changed what the hash covers while the injected bytes stayed the same.
+  const config = injectionConfigFor({});
+  const currentConfig = { version: config.version, algorithm: config.algorithm,
+    source: config.source, relationshipVersion: config.relationshipVersion };
   const notes = [
     "Runs are pooled only when arm, injection config hash, state version and models all match.",
     `Only runs holding an interaction count toward the ${minRuns}-run gate: an interaction is an injection whose delivery reached the member (a \`delivery.settled\` reach status for the same \`deliveryId\`). A manifest-delimited segment in which no member turn was ever reached is a restart, and a run whose every delivery failed holds constructed injections and no member turn at all; neither states anything.`,
     "Every duration is measured in ticks, never in the event stamp `at`.",
-    "A group reports sample variance (n-1) and is `null` for a single run."
+    "A group reports sample variance (n-1) and is `null` for a single run.",
+    `A manifest records the resulting configHash, not the terms behind it; the current config fingerprints are printed above. A change to what the hash covers splits pre-existing manifests from post-upgrade runs even when the injected bytes are unchanged, so an in-flight experiment must restart after such an upgrade.`
   ];
   if (concluded.length === 0 && runs.length > 0) {
     notes.push(observation
@@ -260,7 +278,7 @@ export async function evaluate({ statePath, roomId, minRuns = MIN_RUNS, observat
   return { format: EVAL_FORMAT, version: EVAL_VERSION,
     dependentVariableVersion: DEPENDENT_VARIABLE_VERSION,
     state: statePath, requiredRuns: minRuns, status,
-    assertsConclusions: concluded.length > 0, runs, skipped, invalid, groups, notes };
+    currentConfig, assertsConclusions: concluded.length > 0, runs, skipped, invalid, groups, notes };
 }
 
 /** One line per run, then one block per group. */
@@ -268,6 +286,11 @@ export function renderText(report) {
   const lines = [];
   lines.push(`relationship evaluation — ${report.state}`);
   lines.push(`runs ${report.runs.length}   required per group ${report.requiredRuns}   status ${report.status}`);
+  if (report.currentConfig) {
+    const config = report.currentConfig;
+    lines.push(`current config  version ${config.version}  algorithm ${String(config.algorithm).slice(0, 12)}…  `
+      + `source ${String(config.source).slice(0, 12)}…  relationshipVersion ${config.relationshipVersion}`);
+  }
   for (const item of report.invalid) lines.push(`invalid  ${item.roomId}: ${item.reason}`);
   for (const item of report.skipped) lines.push(`skipped  ${item.roomId}: ${item.reason}`);
   if (report.runs.length > 0) {
