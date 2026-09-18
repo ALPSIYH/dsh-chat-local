@@ -874,13 +874,25 @@ test("a turn records one relationship snapshot equal to the derivation that prec
   // recomputation with other arguments, no reordering, no omission.
   const derived = deriveRelationships({ events: events.slice(0, index), roomId: h.room.id,
     asOfTick: snapshots[0].payload.asOfTick });
-  assert.deepEqual(snapshots[0].payload.pairs, derived.pairs);
+  // A snapshot records what is observable and only what is observable (R50): the
+  // counters per pair. The evidence set is not repeated pair by pair, because
+  // re-deriving this prefix with the same pure function recovers it exactly.
+  const recorded = (pairs) => pairs.map((pair) => ({ observer: pair.observer, target: pair.target,
+    tick: pair.tick, counters: pair.counters }));
+  assert.deepEqual(snapshots[0].payload.pairs, recorded(derived.pairs));
+  assert.deepEqual(Object.keys(snapshots[0].payload.pairs[0]).sort(),
+    ["counters", "observer", "target", "tick"], "no per-pair evidence travels in the snapshot");
   assert.deepEqual(snapshots[0].payload.pairs.map((pair) => `${pair.observer}->${pair.target}`),
     ["s1->s1", "s1->s2", "s2->s1", "s2->s2"], "every ordered member pair, in the derivation's order");
   assert.equal(snapshots[0].payload.derivedFromCount, derived.derivedFrom.length);
   assert.equal(snapshots[0].payload.version, RELATIONSHIP_VERSION);
   assert.equal(snapshots[0].payload.asOfTick, snapshots[0].tick);
   assert.equal(snapshots[0].provenance.roomId, h.room.id);
+  // The snapshot is taken as the turn is scheduled, not when the turn is done:
+  // it precedes the deliveries of its own turn, so "the events preceding it" is
+  // the turn's starting state rather than its outcome.
+  const firstDelivery = events.findIndex((event) => event.type === "delivery.sent");
+  assert.ok(firstDelivery > index, "the snapshot precedes its own turn's first delivery");
   assert.deepEqual(verifyChain(events), { ok: true, brokenAt: null });
   // The snapshot is an observation of the turn, never an input to it: the turn
   // still ran exactly the schedule `turn.scheduled` recorded, and the member it
@@ -989,10 +1001,14 @@ test("the snapshot on disk is byte-for-byte the derivation the log replays it as
   const prefix = events.slice(0, events.indexOf(snapshot));
   // Replaying the log alone must reproduce the stored snapshot exactly, down to
   // the bytes of its canonical serialisation: no field added or dropped, no pair
-  // reordered, no dependence on the Map the derivation built internally.
+  // reordered, no dependence on the Map the derivation built internally. The
+  // replay is what supplies the evidence the snapshot deliberately does not
+  // carry, so this is also the assertion that the omission loses nothing.
+  const recorded = (pairs) => pairs.map((pair) => ({ observer: pair.observer, target: pair.target,
+    tick: pair.tick, counters: pair.counters }));
   const replayed = deriveRelationships({ events: prefix, roomId: h.room.id, asOfTick: snapshot.payload.asOfTick });
-  assert.equal(canonical(snapshot.payload.pairs), canonical(replayed.pairs));
-  assert.equal(canonical(deriveRelationships({ events: prefix, roomId: h.room.id,
-    asOfTick: snapshot.payload.asOfTick }).pairs), canonical(replayed.pairs));
+  assert.equal(canonical(snapshot.payload.pairs), canonical(recorded(replayed.pairs)));
+  assert.equal(canonical(recorded(deriveRelationships({ events: prefix, roomId: h.room.id,
+    asOfTick: snapshot.payload.asOfTick }).pairs)), canonical(recorded(replayed.pairs)));
   await h.service.close();
 });
