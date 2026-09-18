@@ -412,6 +412,24 @@ test("a revocation cannot be forged against a different statement than the one i
   } finally { await h.close(); }
 });
 
+test("the appraisal id chat_relationships hands back is itself citable evidence", async () => {
+  const h = await bootPlugin();
+  try {
+    const first = await recordAppraisal(h, "s1");
+    await h.endTurn(first.call);
+    // The read surface gives an agent exactly one envelope id — its own current
+    // appraisal's — and the tool description must promise no more than that.
+    const mine = await h.tool("chat_relationships").execute({ room: h.room.id }, h.exec("s1"));
+    const envelope = mine.appraisals.s2.appraisalId;
+    assert.equal(typeof envelope, "string");
+    const second = await h.schedule("请再评估", ["s1"]);
+    await h.openTurn(second);
+    const recorded = await h.tool("chat_appraise").execute({ room: h.room.id,
+      ...appraisal({ evidenceEventIds: [envelope], claim: "沿用上一次表态引到的证据" }) }, h.exec("s1"));
+    assert.deepEqual(recorded.evidenceEventIds, [envelope]);
+  } finally { await h.close(); }
+});
+
 test("a revocation may name only the counterparty, and retires the statement in force", async () => {
   const h = await bootPlugin();
   try {
