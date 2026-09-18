@@ -409,6 +409,39 @@ test("a delivery transition on the room a restore replaces is never appended", a
   }
 });
 
+/**
+ * A flush that throws is the save's to report — the state write already landed,
+ * and the append that failed is the one the caller may want to know about. What
+ * it must not do is stay stored as a rejected promise: `settledAudit` joins that
+ * promise, and a read that runs later would then reject with a failure from a
+ * save it never made. The append here is made to throw even though the log's own
+ * writer counts and swallows its failures, because that is the one way the flush
+ * itself can reject.
+ */
+test("a flush that throws is not left as a rejected promise for a later settled read", async () => {
+  const h = await harness();
+  try {
+    const append = h.service.eventLog.append.bind(h.service.eventLog);
+    h.service.eventLog.append = () => { throw new Error("audit flush exploded"); };
+    // One policy call queues exactly one append, and the save that claims it
+    // reports the failure.
+    await assert.rejects(() => h.service.setRoomPolicy(h.room.id, { defaultActionMode: "discuss_only",
+      expectedRevision: 1, gate: true }), /audit flush exploded/);
+    h.service.eventLog.append = append;
+    // The state is durable and the append never ran, so the log is short exactly
+    // one event. A later settled read reports that instead of rejecting.
+    const health = await h.service.settledAudit();
+    assert.equal(health.failed, 0, "the append never ran, so nothing was counted as failed");
+    const events = await h.service.eventsFor(h.room.id);
+    assert.deepEqual(events.filter((event) => event.type === "message.created"
+      && event.payload.authorKind === "system"), []);
+    assert.deepEqual(verifyChain(events), { ok: true, brokenAt: null });
+  } finally {
+    await h.service.close();
+    await rm(h.directory, { recursive: true, force: true });
+  }
+});
+
 test("eventsFor never returns a snapshot missing an append that was already recorded", async () => {
   const h = await harness();
   // The delivery path records without awaiting the append, so it queues appends

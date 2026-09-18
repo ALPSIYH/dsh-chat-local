@@ -117,9 +117,10 @@ const UUID = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g;
  * One execution-mode turn in a room whose only member could not be reached on
  * the previous turn: the record the gate reads, with the room otherwise fresh.
  *
- * Returns with the second delivery's turn open. That is not yet a stable read
- * point for the log — the turn's own writes are still in flight — so a caller
- * that intends to compare event sequences waits with `h.settle()` first.
+ * Returns with the second delivery's turn open and every write that opening
+ * issued already awaited — `openTurn` awaits each observation through its own
+ * save — so the log is a stable read point for a caller that intends to compare
+ * event sequences.
  */
 async function gatedTurn() {
   const h = await harness("关闭对照");
@@ -134,10 +135,11 @@ async function gatedTurn() {
   const call = await waitFor(() => h.calls.at(-1), "the second delivery");
   // The delivery loop records `delivery.sent` for the queued delivery it just
   // handed to the bridge, and only then does the member's turn arrive. Waiting
-  // for that record keeps the two recorded in the order they happened: opening
-  // the turn first lets the delivery reach `delivered` while the `sent`
-  // transition is still waiting for its save, and a transition the room has
-  // already left behind is not what its log states.
+  // for that record keeps the two in the order they happened. It is a defence
+  // rather than the thing this fixture proves: it was load-bearing while a
+  // transition whose save wrote it could still be dropped from the log — without
+  // this wait, 32 of 40 loaded runs recorded a sequence one event short — and the
+  // delivery path now guarantees that record on its own.
   await waitFor(async () => (await h.events()).some((event) => event.type === "delivery.sent"
     && event.payload.deliveryId === call.delivery.id), "the delivery to be recorded as sent");
   await h.openTurn(call);
@@ -533,12 +535,17 @@ test("with the gate off, a whole turn behaves exactly as it did before the gate 
 
 /**
  * The same scenario, repeated with the state directory under concurrent write
- * load. The lock above reads the log immediately after a turn opens, which is
- * exactly the window in which the turn's last delivery event is still queued
- * behind its save; without waiting for that save the read can win the race and
- * report a sequence that is one event short. Each round here asserts the same
- * exact sequence the lock does, so a round that skipped the wait would fail
- * intermittently rather than quietly compare a shorter list.
+ * load. The read is deterministic before `settle()` is reached: `gatedTurn`
+ * returns with every write the turn's opening issued already awaited through its
+ * own save, so the log already holds the whole turn.
+ *
+ * `h.settle()` joins the appends the round has already issued — a seam for work
+ * in flight — and is not what makes the comparison safe. Measured on this
+ * machine, a mutant without it passes all 40 loaded runs, and so does one
+ * without the fixture's wait for `delivery.sent`; what this test holds is that
+ * all sixteen rounds record the same exact sequence, `sequences.size === 1`, so a
+ * change that altered the sequence under load could not pass as one unlucky
+ * round.
  */
 test("the gate-off turn holds its exact recorded sequence across repeated loaded runs", async () => {
   const ROUNDS = 16;
