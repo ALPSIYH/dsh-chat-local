@@ -462,22 +462,33 @@ test("the fallback still derives members from the roster of a log that predates 
   assert.ok(result.derivedFrom.includes("t8"), "the roster that supplied them is the basis");
 });
 
-test("membership events are the authority: a session only a turn named is not an observer", () => {
-  // The costs R41 removes: a member who never appears in a turn or delivery is
-  // invisible to the inference, and a session named only by a delivery gets an
-  // all-zero row. With membership events both are fixed in one place.
+test("a membership event is authoritative for the session it names", () => {
+  // A session the log states is governed by that statement, not by what the
+  // rosters happen to say later: a2 left, and a roster written from the store
+  // before the change still lists it.
   const events = [
     membership({ id: "ma1", sessionId: "a1", tick: 0, at: 1 }),
     membership({ id: "ma2", sessionId: "a2", alias: "乙", role: "复核", tick: 0, at: 2 }),
-    turn({ id: "t1", tick: 1, at: 3, roster: ["a1", "a2", "ghost"] }),
-    message({ id: "t2", author: "a1", tick: 1, at: 4 }),
-    delivery({ id: "t3", member: "ghost", status: "sent", tick: 1, at: 5 })
+    membership({ id: "mr2", sessionId: "a2", type: "member.removed", tick: 3, at: 3 }),
+    turn({ id: "t1", tick: 4, at: 4, roster: ["a1", "a2"] }),
+    message({ id: "t2", author: "a1", tick: 4, at: 5 })
   ];
-  const result = deriveRelationships({ events, roomId: ROOM, asOfTick: 1 });
-  assert.deepEqual(observers(result), ["a1", "a2"]);
-  assert.deepEqual(result.pairs.map((pair) => `${pair.observer}->${pair.target}`),
-    ["a1->a1", "a1->a2", "a2->a1", "a2->a2"]);
+  const result = deriveRelationships({ events, roomId: ROOM, asOfTick: 4 });
+  assert.deepEqual(observers(result), ["a1"]);
   assert.ok(result.pairs[0].derivedFrom.includes("ma1"), "the membership fact is part of the basis");
+});
+
+test("a member stated only by member.added is an observer, though no turn ever named it", () => {
+  // The invisibility R41 removes: a session the log states is a member even
+  // when it never appeared in a turn or a delivery.
+  const events = [
+    membership({ id: "ma1", sessionId: "a1", tick: 0, at: 1 }),
+    membership({ id: "ma9", sessionId: "a9", tick: 0, at: 2 })
+  ];
+  const result = deriveRelationships({ events, roomId: ROOM, asOfTick: 0 });
+  assert.deepEqual(observers(result), ["a1", "a9"]);
+  assert.deepEqual(result.pairs.map((pair) => `${pair.observer}->${pair.target}`),
+    ["a1->a1", "a1->a9", "a9->a1", "a9->a9"]);
 });
 
 test("a member.removed event retires the observer row", () => {
@@ -506,10 +517,35 @@ test("a member who left and rejoined is an observer again", () => {
   assert.deepEqual(observers(deriveRelationships({ events, roomId: ROOM, asOfTick: 4 })), ["a1"]);
 });
 
-test("a member added on top of a pre-upgrade log does not erase the members already there", () => {
-  // The upgrade boundary inside one room: the pre-R41 part of the log still
-  // supplies its members, the events supply the ones that joined later, and a
-  // session named only by a post-upgrade roster is still not a member.
+test("a post-creation membership change never evicts a roster the log never stated (C1)", () => {
+  // The reproduced defect: the fallback used to be scoped to the log prefix
+  // before the first membership event. A room whose roster was never stated in
+  // that prefix — created before the writer learned to emit the events — lost
+  // every pre-existing member the moment one join was recorded: the roster
+  // evidence sits *after* that event, so the prefix was empty.
+  const roster = { id: "t1", tick: 2, at: 2, roster: ["a1", "a2", "a3", "a4", "d4"] };
+  const withoutEvent = [
+    turn(roster),
+    message({ id: "t2", author: "a2", tick: 2, at: 3 })
+  ];
+  // Before the join was stated, the inference alone names the room.
+  assert.deepEqual(observers(deriveRelationships({ events: withoutEvent, roomId: ROOM, asOfTick: 2 })),
+    ["a1", "a2", "a3", "a4", "d4"]);
+  // A session the log never states can only be read from that inference, so
+  // recording the join must not evict the four members it never named.
+  const events = [membership({ id: "md4", sessionId: "d4", tick: 1, at: 1 }), ...withoutEvent];
+  const after = deriveRelationships({ events, roomId: ROOM, asOfTick: 2 });
+  assert.deepEqual(observers(after), ["a1", "a2", "a3", "a4", "d4"]);
+  assert.ok(after.derivedFrom.includes("t1"), "the roster that supplies the unstated members is evidence");
+  assert.ok(after.derivedFrom.includes("md4"));
+});
+
+test("an unstated session is still read from the inference, and the cost of that is stated", () => {
+  // The boundary of the switch, pinned rather than hidden: a session no
+  // membership event names — possible only in the part of a log written before
+  // the writer could state it — is read from the roster/delivery inference. That
+  // keeps a legacy room's members, at the price of admitting a session named
+  // only by a stale delivery, which is the safe direction for an audit.
   const events = [
     turn({ id: "t8", tick: 1, at: 8, roster: ["o1", "o2"] }),
     message({ id: "t2", author: "o1", tick: 1, at: 2 }),
@@ -517,7 +553,7 @@ test("a member added on top of a pre-upgrade log does not erase the members alre
     turn({ id: "t9", tick: 6, at: 9, roster: ["o1", "o2", "o3", "ghost"] })
   ];
   const result = deriveRelationships({ events, roomId: ROOM, asOfTick: 6 });
-  assert.deepEqual(observers(result), ["o1", "o2", "o3"]);
+  assert.deepEqual(observers(result), ["ghost", "o1", "o2", "o3"]);
   assert.ok(result.derivedFrom.includes("t8"), "the pre-upgrade roster that supplied o1 and o2 is evidence");
   assert.ok(result.derivedFrom.includes("ma3"));
 });

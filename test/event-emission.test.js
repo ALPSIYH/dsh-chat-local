@@ -749,3 +749,93 @@ test("every relationship counter that reads a ledger transition is fed by a real
     assert.equal(dispute.kind, "dispute");
   } finally { await h.cleanup(); }
 });
+
+test("an approval is counted once, by the transition that wrote it (I1)", async () => {
+  // The review survives in state, so a transition that only carries it along —
+  // here the comment that crosses it — must not present itself as a second
+  // approval: the consumer counts `reviewerSessionId` + `verdict` regardless of
+  // action, so the writer has to be the one that is precise.
+  const h = await ledgerHarness();
+  try {
+    const source = await h.activate("s2");
+    let entry = await h.service.operateWork(h.room.id, "s2", h.command(source, { action: "record", fields: TASK_FIELDS }));
+    const entryId = entry.id;
+    const act = (input) => h.service.operateWork(h.room.id, "s2",
+      h.command(source, { entryId, expectedRevision: entry.revision, ...input }));
+    entry = await act({ action: "acknowledge" });
+    entry = await act({ action: "submit", deliverable: "核对表 v1" });
+    const reviewer = await h.activate("s3");
+    entry = await h.service.operateWork(h.room.id, "s3", h.command(reviewer, { action: "review", entryId,
+      expectedRevision: entry.revision, verdict: "approve" }));
+    entry = await h.service.operateWork(h.room.id, "s3", h.command(reviewer, { action: "comment", entryId,
+      expectedRevision: entry.revision }));
+
+    const events = (await h.service.eventsFor(h.room.id)).filter((event) => event.type === "ledger.transition");
+    assert.deepEqual(events.map((event) => event.payload.action),
+      ["record", "acknowledge", "submit", "review", "comment"]);
+    assert.deepEqual(events.map((event) => event.payload.verdict), [null, null, null, "approve", null]);
+    const result = deriveRelationships({ events: await h.service.eventsFor(h.room.id), roomId: h.room.id });
+    const counters = (target) => result.pairs.find((pair) => pair.observer === "s1" && pair.target === target).counters;
+    assert.equal(counters("s3").reviewsApproved, 1);
+  } finally { await h.cleanup(); }
+});
+
+test("a rejected review is counted once across a later status transition (I1)", async () => {
+  const h = await ledgerHarness();
+  try {
+    const source = await h.activate("s2");
+    let entry = await h.service.operateWork(h.room.id, "s2", h.command(source, { action: "record", fields: TASK_FIELDS }));
+    const entryId = entry.id;
+    const act = (input) => h.service.operateWork(h.room.id, "s2",
+      h.command(source, { entryId, expectedRevision: entry.revision, ...input }));
+    entry = await act({ action: "acknowledge" });
+    entry = await act({ action: "submit", deliverable: "核对表 v1" });
+    const reviewer = await h.activate("s3");
+    entry = await h.service.operateWork(h.room.id, "s3", h.command(reviewer, { action: "review", entryId,
+      expectedRevision: entry.revision, verdict: "request_changes" }));
+    // A human transition that crosses the rejected review without writing one.
+    await h.service.updateLedgerEntry(h.room.id, entryId, { status: "in_review" }, { expectedRevision: entry.revision });
+
+    const events = (await h.service.eventsFor(h.room.id)).filter((event) => event.type === "ledger.transition");
+    assert.deepEqual(events.map((event) => event.payload.action),
+      ["record", "acknowledge", "submit", "review", "updated"]);
+    assert.deepEqual(events.map((event) => event.payload.verdict), [null, null, null, "request_changes", null]);
+    const result = deriveRelationships({ events: await h.service.eventsFor(h.room.id), roomId: h.room.id });
+    const counters = (target) => result.pairs.find((pair) => pair.observer === "s1" && pair.target === target).counters;
+    assert.equal(counters("s3").reviewsChangesRequested, 1);
+  } finally { await h.cleanup(); }
+});
+
+test("a disposition is reported once, by the transition that recorded it (M1)", async () => {
+  // Same class as I1: the disposition survives a later comment, and a consumer
+  // that treats any `dispositionAction` as a confirmation would attribute the
+  // confirmation — and its `derivedFrom`/`pair.tick` — to the wrong transition.
+  const h = await ledgerHarness();
+  try {
+    const source = await h.activate("s2");
+    let entry = await h.service.operateWork(h.room.id, "s2", h.command(source, { action: "record", fields: TASK_FIELDS }));
+    const entryId = entry.id;
+    const act = (input) => h.service.operateWork(h.room.id, "s2",
+      h.command(source, { entryId, expectedRevision: entry.revision, ...input }));
+    entry = await act({ action: "acknowledge" });
+    entry = await act({ action: "progress", state: "blocked",
+      blocker: { kind: "file", summary: "正文无法读取", nextStep: "提供同版正文" } });
+    entry = await h.service.triageLedgerEntry(h.room.id, entryId,
+      { action: "dismiss_blocker", expectedRevision: entry.revision, operationId: "dismiss-once" });
+    await act({ action: "comment" });
+
+    const events = (await h.service.eventsFor(h.room.id)).filter((event) => event.type === "ledger.transition");
+    assert.deepEqual(events.map((event) => event.payload.action),
+      ["record", "acknowledge", "progress", "triage", "comment"]);
+    assert.deepEqual(events.map((event) => event.payload.dispositionAction),
+      [null, null, null, "dismiss_blocker", null]);
+    const result = deriveRelationships({ events: await h.service.eventsFor(h.room.id), roomId: h.room.id });
+    const counters = (target) => result.pairs.find((pair) => pair.observer === "s1" && pair.target === target).counters;
+    assert.equal(counters("s2").blockedReports, 1);
+    assert.equal(counters("s2").blockedConfirmed, 1);
+    // The comment is not the confirmation being counted, so it is not evidence
+    // for any pair: only the transition that recorded the disposition is.
+    const commentId = events.at(-1).id;
+    assert.equal(result.pairs.some((pair) => pair.derivedFrom.includes(commentId)), false);
+  } finally { await h.cleanup(); }
+});

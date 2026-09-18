@@ -5,6 +5,7 @@ import {tmpdir} from "node:os";
 import {join} from "node:path";
 import {DshChatLocalService} from "../lib/room-store.js";
 import {workProtocol} from "../lib/work-protocol.js";
+import {deriveRelationships} from "../lib/relationship.js";
 
 async function fixture(run){
   const dir=await mkdtemp(join(tmpdir(),"dcl-workspace-")),path=join(dir,"rooms.json"),agents=new Map(),calls=[];let created=0;
@@ -138,6 +139,12 @@ test("a library-archived Agent remains usable from the full group pool in new an
   // This roster screen is a membership change like any other, so the join it
   // makes is recorded in the room's log (R41) rather than only in rooms.json.
   assert.equal((await h.service.eventsFor(existing.id)).filter(event=>event.type==="member.added"&&event.payload.sessionId===updated.members[1].sessionId).length,1);
+  // C1: the conversation was created before this edit and no turn ever ran in
+  // it, so nothing but the creation's own membership facts can keep its original
+  // member an observer. Deriving the pair set is the assertion that it survives.
+  const derived=deriveRelationships({events:await h.service.eventsFor(existing.id),roomId:existing.id});
+  assert.deepEqual([...new Set(derived.pairs.map(pair=>pair.observer))].sort(),
+    updated.members.map(member=>member.sessionId).sort());
   await assert.rejects(h.service.workspace.createGroup({operationId:"outside-reuse",name:"其他群組",members:[b]}),/已從名冊收存/);
   assert.equal((await h.service.workspace.configuration(g.id)).members.filter(member=>member.enabled).length,1);assert.equal(h.created,0);assert.equal(h.calls.length,0);
 }));
