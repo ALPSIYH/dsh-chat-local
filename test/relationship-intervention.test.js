@@ -31,14 +31,17 @@ async function waitFor(predicate, label) {
 }
 
 /** One service with two members and a captured delivery seam, never a real Session. */
-async function harness(config = {}) {
+async function harness(config = {}, { onDeliver } = {}) {
   const directory = await mkdtemp(join(tmpdir(), "dcl-intervention-"));
   const calls = [];
   const ctx = {
     agents: { get: () => ({ cancel() {} }) },
     dshBridge: {
       status: async () => ({ state: "idle" }),
-      deliverExternal: async (from, to, text, delivery) => { calls.push({ from, to, text, delivery }); }
+      deliverExternal: async (from, to, text, delivery) => {
+        calls.push({ from, to, text, delivery });
+        if (onDeliver) await onDeliver({ from, to, text, delivery });
+      }
     },
     get(name) { return this[name]; }
   };
@@ -96,8 +99,8 @@ async function runEpisode(h, text, reply = "回复", turn = 1) {
 }
 
 /** Every event of one type in a room's log, oldest first. */
-async function eventsOfType(h, type) {
-  return (await h.service.eventsFor(h.room.id)).filter((event) => event.type === type);
+async function eventsOfType(h, type, roomId = h.room.id) {
+  return (await h.service.eventsFor(roomId)).filter((event) => event.type === type);
 }
 
 // --- Task 5.1: the intervention API -----------------------------------------
@@ -359,6 +362,8 @@ test("reset_per_episode resets at every episode; persistent never does", async (
       assert.ok(event.payload.countersBefore && typeof event.payload.countersBefore === "object");
     }
     assert.deepEqual(Object.keys(automatic[1].payload.countersBefore).sort(), ["s1", "s2"]);
+    // Each reset names the episode it opened, and the two episodes are distinct.
+    assert.equal(new Set(automatic.map((event) => event.payload.episodeId)).size, 2);
     assert.equal((await eventsOfType(persistent, "relationship.intervention")).length, 0,
       "the persistent arm must not produce an automatic intervention");
     // Same interaction, different dependent variable: the second episode's own
@@ -385,6 +390,45 @@ test("the arm a room is in comes from its own log, not from the process", async 
     assert.equal(automatic.length, 1, "the arm switched mid-log governs from the manifest on");
     const manifests = await eventsOfType(h, RUN_MANIFEST_EVENT_TYPE);
     assert.ok(automatic[0].tick >= manifests[0].tick);
+  } finally { await h.close(); }
+});
+
+test("one episode is one reset, even when a failed delivery is retried", async () => {
+  // The recovery path runs a second `#runTurn` for the same root message, so a
+  // reset appended per turn would fire twice for one human message and the arm
+  // would be "reset per attempt" rather than the "reset per episode" its name,
+  // mechanism and documentation state. The second attempt is not a new episode.
+  let failing = true;
+  const h = await harness({}, { onDeliver: async () => {
+    if (failing) { failing = false; throw new Error("temporary bridge failure"); }
+  } });
+  try {
+    const room = await h.service.createRoom({ name: "重试房间", autoDeliver: true,
+      members: [{ kind: "session", sessionId: "s1", alias: "甲" }] });
+    await h.service.startRun(room.id, { arm: "reset_per_episode", appliedBy: "human" });
+    const original = await h.service.send({ roomId: room.id, author: "human:me", authorKind: "human", text: "重试我" });
+    const first = await waitFor(() => h.calls[0], "the first delivery");
+    await waitFor(async () => (await h.service.messages(room.id))[0]?.deliveries?.[0]?.status === "failed",
+      "the first delivery to fail");
+    await waitFor(async () => !["queued", "running"].includes((await h.service.resolveRoom(room.id)).orchestration?.state),
+      "the failed turn to finish");
+    // The same root message is retried under the same arm.
+    await h.service.retryFailedDeliveries(room.id, original.id);
+    const retried = await waitFor(() => h.calls.find((call) => call.delivery.id !== first.delivery.id),
+      "the retried delivery");
+    await replyTo(h, retried, "重试成功");
+    await waitFor(async () => (await h.service.resolveRoom(room.id)).orchestration?.state === "idle",
+      "the retried turn to end");
+    await h.service.settledAudit();
+    const events = await h.service.eventsFor(room.id);
+    // Two turns really did run: the property is "no second reset", not "the
+    // recovery path skipped the turn".
+    assert.equal(events.filter((event) => event.type === "turn.scheduled").length, 2);
+    const resets = events.filter((event) => event.type === "relationship.intervention"
+      && event.payload.appliedBy === "arm");
+    assert.equal(resets.length, 1, "one episode is one reset, however many turn attempts it takes");
+    assert.equal(resets[0].payload.episodeId, original.id, "the reset names the episode it opened");
+    assert.equal(resets[0].payload.mechanism, "arm:reset_per_episode");
   } finally { await h.close(); }
 });
 

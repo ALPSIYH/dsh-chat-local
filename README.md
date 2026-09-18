@@ -168,7 +168,7 @@ dsh plugin --profile web add link:/path/to/dsh-chat-local
 
 `configHash` 覆盖**影响注入的全部配置**：注入上限（600 字符）、单个 `claim` 的引用上限、两条标题、计数器标签与顺序、立场标签、行模板，以及治理门开关 `room.policy.gate` 与判断部分的进程开关 `appraisalDigest`（插件配置项，默认开）。注入文本就是由这些常量拼出来的，`lib/experiment.js` 是它们的唯一来源，所以两个 `configHash` 相同的 run 注入的是同一段文本，而改了配置却哈希不变的情况不存在。哈希对键序不敏感：等价配置得到同一哈希。
 
-**两条臂。** `arm` 决定关系状态是否跨 episode 携带：`persistent`（没有 manifest 时的默认）累积；`reset_per_episode` 在**每个新回合一开头**自动追加一条 `clear` 干预，`mechanism: "arm:reset_per_episode"`、`appliedBy: "arm"`，同样记录干预前的 counters。臂是从**房间自己的日志**读回来的（最近一条 `run.manifest`），不是进程设置：重启不会悄悄换臂，同一进程里的两个房间也可以处于不同臂。同一份交互在两条臂下这一回合的快照确实不同——`persistent` 带着上一回合的计数，`reset_per_episode` 从零开始。
+**两条臂。** `arm` 决定关系状态是否跨 episode 携带：`persistent`（没有 manifest 时的默认）累积；`reset_per_episode` 在**每个新回合一开头**自动追加一条 `clear` 干预，`mechanism: "arm:reset_per_episode"`、`appliedBy: "arm"`，同样记录干预前的 counters，并记录它开启的是哪一局（`episodeId`，即那条根消息）。一局就是**一条根消息的整段回合序列**：投递失败后重试会让同一个根消息再跑一次回合，但那仍是同一局，不会再追加第二条 `clear`；只有新的一条 `run.manifest` 才开启新的一局。臂是从**房间自己的日志**读回来的（最近一条 `run.manifest`），不是进程设置：重启不会悄悄换臂，同一进程里的两个房间也可以处于不同臂。同一份交互在两条臂下这一回合的快照确实不同——`persistent` 带着上一回合的计数，`reset_per_episode` 从零开始。
 
 **注入成本。** 每次唤醒成员，除了 `turn.prompt` 还会追加一条 `injection.cost`：`digestChars` 是**实际注入的那段摘要**的字符数（不是上限），`digestHash` 是它的 SHA-256，`promptChars` 是整条提示词的长度，另有 `estimatedTokens` 以及它明确标注为估算的算法（`tokenEstimateMethod`，`tokenEstimateExact: false`）和估算用到的码点计数。记录它不改变注入文本，也不改变 600 字符上限。
 
