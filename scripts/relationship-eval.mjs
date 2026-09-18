@@ -59,9 +59,10 @@
  * sample is insufficient and conclusions were refused.
  */
 import { readdir } from "node:fs/promises";
+import { realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import { EventLog, eventLogPath, verifyChain } from "../lib/event-log.js";
 import { MIN_RUNS, DEPENDENT_VARIABLE_VERSION, dependentVariables, dispersion, hasInteraction,
   injectionConfigFor, runSegments } from "../lib/experiment.js";
@@ -415,8 +416,36 @@ async function main() {
   return 0;
 }
 
-// Importable for tests: the CLI runs only when this file is the entry point.
-if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {
+/**
+ * Whether this file is the process's entry point, so the CLI runs when it is
+ * invoked and the module stays importable for tests when it is not.
+ *
+ * `node` resolves the executed module's own URL through symlinks but keeps
+ * `process.argv[1]` as it was typed, so comparing the two raw URLs made a
+ * symlinked invocation — macOS `/tmp` → `/private/tmp`, or a symlinked install —
+ * evaluate nothing and exit 0 with no output: a gate script reporting success for
+ * a run it never performed. Both sides are resolved before they are compared, so
+ * the answer describes the file rather than the name it was reached by.
+ *
+ * An entry path that cannot be resolved is not this file, and an importing
+ * process is left unlaunched; but the reason is printed and the exit code is set
+ * rather than swallowed, so the failure mode is never again "nothing happened,
+ * exit 0".
+ */
+function isEntryPoint() {
+  const given = process.argv[1];
+  if (given === undefined) return false;
+  let invoked;
+  try { invoked = realpathSync(given); }
+  catch (error) {
+    process.stderr.write(`relationship-eval: cannot resolve the entry path ${given}: ${String(error?.message ?? error)}\n`);
+    process.exitCode = 1;
+    return false;
+  }
+  return realpathSync(fileURLToPath(import.meta.url)) === invoked;
+}
+
+if (isEntryPoint()) {
   main().then((status) => { process.exitCode = status; })
     .catch((error) => { process.stderr.write(`relationship-eval: ${String(error?.message ?? error)}\n`); process.exitCode = 1; });
 }

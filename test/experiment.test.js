@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFile, execFileSync } from "node:child_process";
-import { mkdtemp, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -31,10 +31,10 @@ import { EVAL_FORMAT, INSUFFICIENT_EXIT, evaluate, renderText } from "../scripts
 
 const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), "..", "scripts", "relationship-eval.mjs");
 
-/** Run the script as a process and report its exit code and streams. */
-async function runScript(args, timeoutMs) {
+/** Run one file as a process and report its exit code and streams. */
+async function runNode(scriptPath, args, timeoutMs) {
   return await new Promise((resolve) => {
-    execFile(process.execPath, [SCRIPT, ...args],
+    execFile(process.execPath, [scriptPath, ...args],
       { encoding: "utf8", maxBuffer: 8 * 1024 * 1024, ...(timeoutMs === undefined ? {} : { timeout: timeoutMs }) },
       (error, stdout, stderr) => resolve({
         // A process killed by the timeout has no exit code; separating that from
@@ -43,6 +43,11 @@ async function runScript(args, timeoutMs) {
         killed: error?.killed === true, stdout, stderr
       }));
   });
+}
+
+/** Run the script as a process and report its exit code and streams. */
+async function runScript(args, timeoutMs) {
+  return await runNode(SCRIPT, args, timeoutMs);
 }
 
 /** An event as the log's writer takes it: no `id`, `at`, `prev` or `hash` yet. */
@@ -769,4 +774,33 @@ test("the run gate cannot be lowered, and a directory with no run exits 2", asyn
     assert.equal(empty.code, 2);
     assert.match(empty.stderr, /no run found/u);
   } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test("a symlinked invocation evaluates rather than exiting 0 with no output", async () => {
+  const { directory, statePath } = await stateWithRuns(10);
+  const linkDirectory = await mkdtemp(join(tmpdir(), "dcl-eval-link-"));
+  try {
+    // `node` resolves the invoked module's own URL through symlinks but keeps
+    // `process.argv[1]` as typed, so an entry guard that compares the raw forms
+    // fails here and the script used to do nothing while reporting success. A
+    // link inside a directory that is itself a symlink covers both shapes.
+    const linked = join(linkDirectory, "nested");
+    await symlink(dirname(SCRIPT), linked);
+    const invoked = join(linked, "relationship-eval.mjs");
+    const answered = await runNode(invoked, ["--state", statePath, "--json"]);
+    assert.equal(answered.code, 0, answered.stderr);
+    assert.notEqual(answered.stdout, "", "a symlinked invocation must actually evaluate");
+    const report = JSON.parse(answered.stdout);
+    assert.equal(report.status, "conclusive");
+    assert.equal(report.runs.length, 10);
+    // A genuinely wrong state path stays loud through the same invocation: the
+    // failure mode this guard had was "nothing ran, exit 0".
+    const wrong = await runNode(invoked, ["--state", join(directory, "empty", "rooms.json")]);
+    assert.equal(wrong.code, 2);
+    assert.match(wrong.stderr, /no run found/u);
+    assert.match(wrong.stderr, /relationship-eval:/u);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+    await rm(linkDirectory, { recursive: true, force: true });
+  }
 });
