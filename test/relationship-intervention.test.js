@@ -8,7 +8,8 @@ import { createHash } from "node:crypto";
 import { DshChatLocalService, relationshipDigest, RELATIONSHIP_DIGEST_MAX_CHARS } from "../lib/room-store.js";
 import { apply } from "../lib/index.js";
 import { deriveRelationships, effectiveAppraisals } from "../lib/relationship.js";
-import { configHashOf, injectionConfigFor, RUN_MANIFEST_EVENT_TYPE } from "../lib/experiment.js";
+import { configHashOf, injectionConfigFor, RUN_MANIFEST_EVENT_TYPE,
+  RELATIONSHIP_DIGEST_HEADING, RELATIONSHIP_DIGEST_APPRAISAL_HEADING } from "../lib/experiment.js";
 
 /**
  * The experiment's own surfaces: the human-only intervention API, the run
@@ -423,6 +424,48 @@ test("the injection cost records the characters actually injected", async () => 
     assert.equal(cost.payload.estimatedTokens,
       Math.ceil(cost.payload.tokenEstimateCjkChars + cost.payload.tokenEstimateOtherChars / 4));
   } finally { await h.close(); }
+});
+
+test("switching the judgement half off removes appraisals from the prompt and keeps the counters", async () => {
+  for (const appraisalDigest of [true, false]) {
+    const h = await harness({ appraisalDigest });
+    try {
+      await runEpisode(h, "第一轮", "回复一");
+      const cited = (await h.service.eventsFor(h.room.id))
+        .find((event) => event.type === "message.created" && event.provenance?.actorId === "s2");
+      // The appraisal has to be recorded inside an active turn, so the second
+      // episode is answered by hand rather than by `runEpisode`.
+      const known = new Set(h.calls.map((call) => call.delivery.id));
+      await h.service.send({ roomId: h.room.id, author: "human:me", authorKind: "human", text: "第二轮" });
+      const first = await waitFor(() => h.calls.find((call) => call.to === "s1" && !known.has(call.delivery.id)),
+        "the second episode's s1 delivery");
+      known.add(first.delivery.id);
+      await activate(h, first, 2);
+      await h.service.appraise(h.room.id, "s1", { action: "record", aboutAgentId: "s2", stance: "trust",
+        confidence: 0.8, claim: "他说清楚了", evidenceEventIds: [cited.payload.messageId] });
+      await h.service.observeSessionEvent("s1", { type: "assistant/message", data: { turn: 2, step: 1,
+        message: { content: [{ type: "text", text: "回复二" }] } } });
+      await h.service.observeSessionEvent("s1", { type: "turn/end", data: { turn: 2, reason: { kind: "completed" } } });
+      const second = await waitFor(() => h.calls.find((call) => call.to === "s2" && !known.has(call.delivery.id)),
+        "the second episode's s2 delivery");
+      await replyTo(h, second, "回复二", 2);
+      await waitFor(async () => (await h.service.resolveRoom(h.room.id)).orchestration?.state === "idle", "the episode to end");
+      await h.service.settledAudit();
+      // The third episode is where the statement is injected or not.
+      const calls = await runEpisode(h, "第三轮", "回复三", 3);
+      const delivery = calls.find((call) => call.to === "s1").delivery.id;
+      const events = await h.service.eventsFor(h.room.id);
+      const prompt = events.filter((event) => event.type === "turn.prompt")
+        .find((event) => event.payload.deliveryId === delivery).payload.prompt;
+      assert.ok(prompt.includes(RELATIONSHIP_DIGEST_HEADING), "the counters always travel");
+      assert.equal(prompt.includes(RELATIONSHIP_DIGEST_APPRAISAL_HEADING), appraisalDigest,
+        `appraisalDigest=${appraisalDigest}: the judgement block is ${appraisalDigest ? "rendered" : "omitted"}`);
+      assert.equal(prompt.includes("他说清楚了"), appraisalDigest, "and the claim with it");
+      const cost = events.filter((event) => event.type === "injection.cost")
+        .find((event) => event.payload.deliveryId === delivery);
+      assert.ok(cost.payload.digestChars > 0 && cost.payload.digestChars <= RELATIONSHIP_DIGEST_MAX_CHARS);
+    } finally { await h.close(); }
+  }
 });
 
 test("a turn with no relationship text records a zero cost rather than a ceiling", async () => {
