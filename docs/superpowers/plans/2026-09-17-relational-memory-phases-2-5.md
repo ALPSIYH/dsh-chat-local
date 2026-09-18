@@ -59,7 +59,7 @@
 | `blockedReports` | `ledger.transition` 中 `payload.ownerSessionId === target` 且 `payload.action === "progress"` 且 `payload.state === "blocked"` 的条数 |
 | `blockedConfirmed` | 上述那些中后来被 `payload.action === "progress"` 且 `state === "in_progress"` 解除、或被 `disposition.action` 确认的条数（按 entryId 配对；**不得**用时间差猜） |
 | `unresolvedDisagreements` | `ledger.transition` 中 `payload.kind === "dispute"` 的条目里、最终 `status` 不属于 `CLOSED_LEDGER_STATUSES` 的条数 |
-| `charterProposalsSuperseded` | `ledger.transition`/`charter.*` 中 `payload.proposerSessionId === target` 且被 `replacesProposalId` 取代的提案数 |
+| `charterProposalsSuperseded` | `ledger.transition` 中 `payload.proposerSessionId === target`、且其提案 id（即该变迁的 `entryId`）被另一条 `ledger.transition` 的 `payload.replacesProposalId` 指名的条数。全库没有 `charter.*` 事件，这两个字段只出现在 `ledger.transition` 上 |
 | `messagesAuthored` | `message.created` 中 `provenance.actorId === target` 的条数 |
 
 - `observer` 的取值：房间内**每一个**成员（含 target 自己），因为"我对我自己"也是一条可分析的基线。
