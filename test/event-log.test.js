@@ -491,3 +491,24 @@ test("drain waits for appends no caller awaited", async () => {
   assert.equal(events.length, 2);
   assert.deepEqual(verifyChain(events), { ok: true, brokenAt: null });
 });
+
+test("a log path that is not a regular file is refused rather than read", async () => {
+  // `readFile` on a named pipe waits for a writer instead of failing, and a
+  // reader with no writer waits forever. A directory is the deterministic stand
+  // in for "not a regular file" here, because it cannot hang the test if the
+  // guard regresses; the FIFO itself is exercised, with a hard timeout, by the
+  // evaluation script's own test.
+  const directory = await mkdtemp(join(tmpdir(), "dcl-events-notfile-"));
+  const log = new EventLog(join(directory, "rooms.json"));
+  try {
+    await mkdir(join(directory, "events", "r1.jsonl"), { recursive: true });
+    await assert.rejects(() => log.read("r1"), /not a regular file/u);
+    await rm(join(directory, "events", "r1.jsonl"), { recursive: true, force: true });
+    // The head anchor is read on the same path and would wait in the same way,
+    // so it is type-checked too.
+    await mkdir(join(directory, "events", "r1.jsonl.head"), { recursive: true });
+    await writeFile(join(directory, "events", "r1.jsonl"), "");
+    await assert.rejects(() => log.read("r1"), /not a regular file/u);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+

@@ -307,6 +307,12 @@ async function main() {
   }
   if (report.runs.length === 0) {
     process.stderr.write(`relationship-eval: no run found in ${report.state}\n`);
+    // Why there is no run is the actionable half: a refused log (a broken chain,
+    // a path that is not a regular file) is named here rather than only in the
+    // text report, which this branch does not print.
+    for (const item of report.invalid) {
+      process.stderr.write(`relationship-eval: invalid  ${item.roomId}: ${item.reason}\n`);
+    }
     if (options.json) process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
     return 2;
   }

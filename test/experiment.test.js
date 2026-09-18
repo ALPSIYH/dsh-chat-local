@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
-import { mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { execFile, execFileSync } from "node:child_process";
+import { mkdtemp, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -28,10 +28,16 @@ import { EVAL_FORMAT, INSUFFICIENT_EXIT, evaluate, renderText } from "../scripts
 const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), "..", "scripts", "relationship-eval.mjs");
 
 /** Run the script as a process and report its exit code and streams. */
-async function runScript(args) {
+async function runScript(args, timeoutMs) {
   return await new Promise((resolve) => {
-    execFile(process.execPath, [SCRIPT, ...args], { encoding: "utf8", maxBuffer: 8 * 1024 * 1024 },
-      (error, stdout, stderr) => resolve({ code: error?.code ?? 0, stdout, stderr }));
+    execFile(process.execPath, [SCRIPT, ...args],
+      { encoding: "utf8", maxBuffer: 8 * 1024 * 1024, ...(timeoutMs === undefined ? {} : { timeout: timeoutMs }) },
+      (error, stdout, stderr) => resolve({
+        // A process killed by the timeout has no exit code; separating that from
+        // "exited 0" is what lets the FIFO test tell a refusal from a hang.
+        code: error ? (error.code ?? -1) : 0,
+        killed: error?.killed === true, stdout, stderr
+      }));
   });
 }
 
@@ -352,6 +358,37 @@ test("ten runs conclude, with dispersion and not only a mean", async () => {
     const text = renderText(report);
     assert.match(text, /variance/u);
     assert.match(text, /sd/u);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test("a FIFO beside the logs is refused with a reason instead of hanging", async (t) => {
+  const { directory, statePath } = await stateWithRuns(1);
+  try {
+    await mkdir(dirname(join(directory, "events", "stuck.jsonl")), { recursive: true });
+    try { execFileSync("mkfifo", [join(directory, "events", "stuck.jsonl")]); }
+    catch (error) { t.skip(`mkfifo is unavailable: ${String(error?.message ?? error)}`); return; }
+    // A named pipe is never a complete log and has no writer here, so an
+    // unguarded read waits forever. The timeout is the assertion: a process that
+    // had to be killed proves nothing about how the file is handled.
+    const refused = await runScript(["--state", statePath, "--json"], 6_000);
+    assert.equal(refused.killed, false, "the evaluation must refuse the FIFO, not wait on it");
+    assert.equal(refused.code, INSUFFICIENT_EXIT, refused.stderr);
+    const report = JSON.parse(refused.stdout);
+    assert.equal(report.runs.length, 1, "the regular log beside it is still analysed");
+    assert.deepEqual(report.invalid.map((item) => item.roomId), ["stuck"]);
+    assert.match(report.invalid[0].reason, /not a regular file/u);
+    // A state directory holding nothing but the FIFO has no run to analyse, and
+    // the refusal is what an operator needs from stderr — not just "no run".
+    const only = await mkdtemp(join(tmpdir(), "dcl-eval-fifo-"));
+    try {
+      await mkdir(join(only, "events"), { recursive: true });
+      execFileSync("mkfifo", [join(only, "events", "stuck.jsonl")]);
+      const empty = await runScript(["--state", join(only, "rooms.json")], 6_000);
+      assert.equal(empty.killed, false);
+      assert.equal(empty.code, 2);
+      assert.match(empty.stderr, /no run found/u);
+      assert.match(empty.stderr, /not a regular file/u);
+    } finally { await rm(only, { recursive: true, force: true }); }
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
