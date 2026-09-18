@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { validateSnapshot } from "../lib/room-export.js";
@@ -319,6 +320,19 @@ test("a restore's state file is not rewritten by the turn it superseded", async 
   await service.close();
 });
 
+/**
+ * A restore whose own state write fails has to roll back, keep the audits its
+ * save claimed, and keep the append a save that landed in its window still owes.
+ *
+ * The write fails for real, at the filesystem: the destination is occupied by a
+ * directory the instant the restore's save reaches it, so the `rename` that
+ * installs the snapshot fails with the kernel's EISDIR, the way a vanished or
+ * read-only path does in production. A synthetic rejected promise would not model
+ * this — the previous version of this test threw before `#save` reached its
+ * guarded write, so the audits it had claimed were never re-queued and the path
+ * the product actually takes had no coverage — and a single failing save is never
+ * concurrent with another flush, so it could not cover the window either.
+ */
 test("a restore whose save fails leaves memory exactly as it was", async () => {
   const directory = await mkdtemp(join(tmpdir(), "dcl-snap-"));
   const service = await serviceAt(directory);
@@ -328,17 +342,69 @@ test("a restore whose save fails leaves memory exactly as it was", async () => {
   const snapshot = JSON.parse((await service.snapshotRun(room.id, "cfg")).content);
   await service.send({ roomId: room.id, author: "human:me", authorKind: "human", text: "二" });
   const statePath = join(directory, "rooms.json");
-  const before = await readFile(statePath, "utf8");
+  const previous = service.state.rooms[0];
+  // A real producer queues the event for the live room and its save is parked, so
+  // its write lands only after the restore has swapped the room away. A flush
+  // that refuses that entry because the swap has happened drops a fact that *is*
+  // the durable state, with no re-queue and no trace, and the log then
+  // under-describes `rooms.json` forever.
+  let releaseSave;
+  const held = new Promise((resolve) => { releaseSave = resolve; });
+  service.saveTail = held;
+  const producing = service.setRoomPolicy(room.id, { defaultActionMode: "read_only_audit",
+    expectedRevision: previous.policy.revision, gate: true });
+  producing.catch(() => {});
+  await waitFor(() => service.saveTail !== held, "the producer's save to claim and park");
   const beforeMessages = (await service.messages(room.id)).map((message) => message.text);
-  // The only honest way to make this save fail from a test: the room operation
-  // is chained onto `saveTail`, so a save operation that rejects here is exactly
-  // what a full disk or a vanished directory looks like to `#save`.
-  const blocked = new Error("simulated save failure");
-  service.saveTail = { then() { throw blocked; } };
-  await assert.rejects(() => service.restoreFromSnapshot(snapshot, { confirm: true }), /simulated save failure/);
+  // One entry the restore's own save will claim, and therefore has to re-queue
+  // when its write fails. Queued in the queue's own shape, like every producer.
+  const probe = { id: crypto.randomUUID() };
+  service.pendingAudit.push({ room: previous,
+    build: () => ({ type: "probe.requeued", actor: { kind: "system", id: "system:probe" },
+      payload: { id: probe.id }, provenance: { originClass: "system", sessionKind: "interactive" } }),
+    stillValid: () => true });
+  const restoring = service.restoreFromSnapshot(snapshot, { confirm: true });
+  restoring.catch(() => {});
+  await waitFor(() => service.pendingLogReplace.size > 0, "the restore's replace gate");
+  // The destination is made a directory the instant the producer's write has
+  // landed and published its flush — after that write and before the restore's
+  // own — so the restore's rename fails with EISDIR, a real failing write.
+  let durable = null;
+  let flush = service.auditFlush;
+  Object.defineProperty(service, "auditFlush", {
+    configurable: true,
+    get() { return flush; },
+    set(value) {
+      flush = value;
+      if (durable !== null || service.pendingLogReplace.size === 0) return;
+      durable = readFileSync(statePath, "utf8");
+      rmSync(statePath);
+      mkdirSync(statePath);
+    }
+  });
+  releaseSave();
+  await assert.rejects(() => restoring, (error) => error.code === "EISDIR");
+  // Undo the test's own injection, so the bytes on disk are again the durable
+  // state the failed restore did not write.
+  rmSync(statePath, { recursive: true });
+  writeFileSync(statePath, durable, { mode: 0o600 });
+  assert.equal(service.state.rooms[0], previous, "the failed restore was rolled back in memory");
   assert.deepEqual((await service.messages(room.id)).map((message) => message.text), beforeMessages,
     "the failed restore was rolled back in memory");
-  assert.equal(await readFile(statePath, "utf8"), before);
+  assert.equal(await readFile(statePath, "utf8"), durable);
+  // A save after the failure re-claims what the failed one re-queued, and the
+  // append the producer's write was owed is on the log now that the restore has
+  // settled and the room it replaced is live again.
+  await service.setRoomDetails(room.id, { name: "回滚后再改",
+    expectedRevision: (await service.resolveRoom(room.id)).revision });
+  await service.settledAudit();
+  const events = await service.eventsFor(room.id);
+  assert.equal(events.filter((event) => event.type === "message.created" && event.payload?.authorKind === "system"
+    && String(event.payload?.text).includes("read_only_audit")).length, 1,
+    "a durable change with no audit event leaves the log under-describing rooms.json");
+  assert.deepEqual(events.filter((event) => event.type === "probe.requeued").map((event) => event.payload.id),
+    [probe.id], "the audits a failed restore claimed must be re-queued, not discarded");
+  assert.deepEqual(verifyChain(events), { ok: true, brokenAt: null });
   await service.close();
 });
 
