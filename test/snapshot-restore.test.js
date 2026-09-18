@@ -663,8 +663,9 @@ test("two restores of one room are serialised, so the mutual wait cannot form", 
   assert.equal(service.pendingLogReplace.size, 1, "only the running restore's replace is in flight");
   releaseSave();
   const settled = await Promise.allSettled([first, second]);
-  assert.deepEqual(settled.map((result) => result.status), ["fulfilled", "fulfilled"],
-    "a restore never settled: two replaces for one room can wait on each other forever");
+  const statuses = settled.map((result) => result.status);
+  assert.deepEqual(statuses, ["fulfilled", "fulfilled"],
+    `a restore did not settle (${statuses.join(",")}): ${settled.map((result) => result.reason?.message ?? "").join("; ")}`);
   assert.equal(registry.size, 0, "a log replace was left registered");
   await service.settledAudit();
   assert.deepEqual(verifyChain(await service.eventsFor(room.id)), { ok: true, brokenAt: null });
