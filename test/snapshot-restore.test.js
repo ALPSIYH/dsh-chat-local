@@ -170,9 +170,12 @@ test("a snapshot whose chain is broken is rejected before anything is overwritte
   const snapshot = JSON.parse((await service.snapshotRun(room.id, "cfg")).content);
   await service.send({ roomId: room.id, author: "human:me", authorKind: "human", text: "二" });
   await saveNow();
-  assert.equal(snapshot.events.length, 1);
+  // The log also holds the room's own membership fact (R41), so the snapshot
+  // taken after the first durable message is two links, not one; the head is
+  // still the event with no predecessor.
+  assert.equal(snapshot.events.length, 2);
   assert.equal(snapshot.events[0].prev, null);
-  assert.equal((await service.eventsFor(room.id)).length, 2);
+  assert.equal((await service.eventsFor(room.id)).length, 3);
   const before = await service.messages(room.id);
   const beforeEvents = await service.eventsFor(room.id);
   // Re-sign the shortened snapshot so it is otherwise well-formed: what has to
@@ -183,7 +186,7 @@ test("a snapshot whose chain is broken is rejected before anything is overwritte
   // A snapshot of the same room taken one event later: its second link is real,
   // so dropping the head leaves an event whose `prev` names nothing.
   const later = JSON.parse((await service.snapshotRun(room.id, "cfg")).content);
-  assert.equal(later.events.length, 2);
+  assert.equal(later.events.length, 3);
   assert.equal(later.events[1].prev, later.events[0].hash);
   const noHead = rebuilt(later.events.slice(1), later.room);
   const inspected = validateSnapshot(noHead);

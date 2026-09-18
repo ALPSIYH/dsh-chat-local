@@ -64,14 +64,18 @@ test("events are append-only: a replay of the same operation adds no second even
   await h.service.send({ roomId: h.room.id, author: "human:me", authorKind: "human",
     text: "重试", clientOperationId: "op-1" });
   const events = await h.service.eventsFor(h.room.id);
-  assert.equal(events.filter((event) => event.type === "message.created").length, 1);
-  assert.equal(events[0].payload.messageId, message.id);
+  const created = events.filter((event) => event.type === "message.created");
+  assert.equal(created.length, 1);
+  assert.equal(created[0].payload.messageId, message.id);
 });
 
 test("a log write failure does not fail the send itself", async () => {
   const h = await harness();
   // A regular file where the per-room log directory belongs makes every append
-  // fail, so the side channel cannot succeed by accident.
+  // fail, so the side channel cannot succeed by accident. Creating the room is
+  // itself a membership fact now, so the directory already exists and is
+  // replaced rather than written over.
+  await rm(join(h.directory, "events"), { recursive: true, force: true });
   await writeFile(join(h.directory, "events"), "not a directory", "utf8");
   let sent;
   await assert.doesNotReject(async () => {
@@ -424,8 +428,9 @@ test("a save that never lands leaves no message.created behind it", async () => 
   await mkdir(join(h.directory, "rooms.json"));
   await assert.rejects(() => h.service.send({ roomId: h.room.id, author: "human:me", authorKind: "human", text: "不会落地" }));
   // #commitSend saves before it records; an event here would describe state that
-  // never reached disk.
-  assert.deepEqual(await h.service.eventsFor(h.room.id), []);
+  // never reached disk. The room's own creation is audited separately, so the
+  // claim is about the message, not about an empty log.
+  assert.deepEqual((await h.service.eventsFor(h.room.id)).filter((event) => event.type === "message.created"), []);
 });
 
 test("a delivery status change whose save never lands leaves no delivery event behind it", async (t) => {
@@ -652,5 +657,50 @@ test("a superseded charter proposal is counted from a real room log, not a silen
       && pair.target === sessionId)?.counters;
     assert.equal(counters("s2").charterProposalsSuperseded, 1);
     assert.equal(counters("s3").charterProposalsSuperseded, 0);
+  } finally { await h.cleanup(); }
+});
+
+test("creating a room records a member.added event for every member it starts with (R41)", async () => {
+  const h = await ledgerHarness();
+  try {
+    const events = (await h.service.eventsFor(h.room.id)).filter((event) => event.type === "member.added");
+    assert.equal(events.length, 3);
+    assert.deepEqual(events.map((event) => event.payload.sessionId), ["s1", "s2", "s3"]);
+    assert.deepEqual(events.map((event) => event.payload.alias), ["记录", "执行", "复核"]);
+    assert.deepEqual(events.map((event) => event.payload.role), [null, null, null]);
+    // `at` is one of the fields the ruling names, and the envelope's own `at` is
+    // not a substitute for a fact in the payload.
+    assert.equal(events.every((event) => Number.isFinite(event.payload.at) && event.payload.at > 0), true);
+    assert.deepEqual(verifyChain(await h.service.eventsFor(h.room.id)), { ok: true, brokenAt: null });
+  } finally { await h.cleanup(); }
+});
+
+test("joining and leaving a room are recorded as member.added and member.removed (R41)", async () => {
+  const h = await ledgerHarness();
+  try {
+    await h.service.addMember(h.room.id, { kind: "session", sessionId: "s4", alias: "新人", role: "观察" });
+    await h.service.removeMember(h.room.id, "s1");
+    const events = (await h.service.eventsFor(h.room.id)).filter((event) => event.type.startsWith("member."));
+    assert.deepEqual(events.map((event) => [event.type, event.payload.sessionId]), [
+      ["member.added", "s1"], ["member.added", "s2"], ["member.added", "s3"],
+      ["member.added", "s4"], ["member.removed", "s1"]]);
+    const joined = events.at(-2).payload;
+    assert.deepEqual([joined.alias, joined.role], ["新人", "观察"]);
+    // The departing fact names who left; the derivation can only retire the row
+    // if the event names the session, not merely the position it held.
+    assert.equal(events.at(-1).payload.alias, "记录");
+    assert.deepEqual(verifyChain(await h.service.eventsFor(h.room.id)), { ok: true, brokenAt: null });
+  } finally { await h.cleanup(); }
+});
+
+test("a room driven through the writer derives its observers from membership events (R41)", async () => {
+  const h = await ledgerHarness();
+  try {
+    await h.service.addMember(h.room.id, { kind: "session", sessionId: "s4", alias: "新人" });
+    await h.service.removeMember(h.room.id, "s1");
+    // No turn ever ran for s4, and s1 left, so the pre-R41 inference could only
+    // have named the three original members for the wrong reasons.
+    const result = deriveRelationships({ events: await h.service.eventsFor(h.room.id), roomId: h.room.id });
+    assert.deepEqual([...new Set(result.pairs.map((pair) => pair.observer))], ["s2", "s3", "s4"]);
   } finally { await h.cleanup(); }
 });

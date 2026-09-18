@@ -135,6 +135,9 @@ test("a library-archived Agent remains usable from the full group pool in new an
   const current=await h.service.participantConfiguration(existing.id);
   const updated=await h.service.updateParticipants(existing.id,{expectedRevision:current.revision,operationId:"add-existing-pool-b",members:[...current.members,{...b,enabled:true}],environment:pool.environment});
   assert.equal(updated.members[1].agentId,b.agentId);
+  // This roster screen is a membership change like any other, so the join it
+  // makes is recorded in the room's log (R41) rather than only in rooms.json.
+  assert.equal((await h.service.eventsFor(existing.id)).filter(event=>event.type==="member.added"&&event.payload.sessionId===updated.members[1].sessionId).length,1);
   await assert.rejects(h.service.workspace.createGroup({operationId:"outside-reuse",name:"其他群組",members:[b]}),/已從名冊收存/);
   assert.equal((await h.service.workspace.configuration(g.id)).members.filter(member=>member.enabled).length,1);assert.equal(h.created,0);assert.equal(h.calls.length,0);
 }));

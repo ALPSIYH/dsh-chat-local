@@ -67,10 +67,27 @@ function charter({ id, tick, at, type = "charter.proposed", payload }) {
   return event({ id, type, actor: `session:${payload.proposerSessionId ?? "human"}`, tick, at, payload });
 }
 
+/** A `member.added` / `member.removed` envelope: the shape the store now writes (R41). */
+function membership({ id, sessionId, type = "member.added", alias = sessionId, role = null, tick = 0, at = 0 }) {
+  return event({ id, type, actor: "human:human:me", tick, at, payload: { sessionId, alias, role, at } });
+}
+
+/** An ordered `turn.scheduled` envelope, used as pre-R41 membership evidence. */
+function turn({ id, tick, at, roster }) {
+  return event({ id, type: "turn.scheduled", tick, at,
+    payload: { rootMessageId: "m-root", epoch: 1, recipients: [...roster], order: "configured",
+      rotationStart: 0, executed: [...roster] } });
+}
+
+/** The observers a derivation admits, in the pair order it emits them. */
+function observers(result) {
+  return [...new Set(result.pairs.map((pair) => pair.observer))];
+}
+
 /**
- * Three members (o1, o2, r1) and one turn. `turn.scheduled` is the membership
- * evidence: there is no member-added event in the log today, so the recipients
- * list of a turn is the only place the log records who the room's members are.
+ * Three members (o1, o2, r1) and one turn. This log predates `member.added`:
+ * `turn.scheduled`'s roster is then the only membership evidence there is, and
+ * the derivation must still read it (R41's documented fallback).
  */
 function membersEvent() {
   return event({
@@ -435,3 +452,86 @@ test("input the module cannot interpret is refused rather than guessed at", () =
   assert.throws(() => deriveRelationships({ events: {}, roomId: ROOM }), TypeError);
   assert.throws(() => deriveRelationships({ events: [], roomId: ROOM, asOfTick: Number.NaN }), TypeError);
 });
+
+test("the fallback still derives members from the roster of a log that predates member events", () => {
+  // R41's other half: the inference is a fallback, not a deletion. A log with no
+  // membership event must derive exactly the observers it did before, or every
+  // existing room would come back empty after the upgrade.
+  const result = deriveRelationships({ events: log(), roomId: ROOM, asOfTick: 8 });
+  assert.deepEqual(observers(result), ["o1", "o2", "r1"]);
+  assert.ok(result.derivedFrom.includes("t8"), "the roster that supplied them is the basis");
+});
+
+test("membership events are the authority: a session only a turn named is not an observer", () => {
+  // The costs R41 removes: a member who never appears in a turn or delivery is
+  // invisible to the inference, and a session named only by a delivery gets an
+  // all-zero row. With membership events both are fixed in one place.
+  const events = [
+    membership({ id: "ma1", sessionId: "a1", tick: 0, at: 1 }),
+    membership({ id: "ma2", sessionId: "a2", alias: "乙", role: "复核", tick: 0, at: 2 }),
+    turn({ id: "t1", tick: 1, at: 3, roster: ["a1", "a2", "ghost"] }),
+    message({ id: "t2", author: "a1", tick: 1, at: 4 }),
+    delivery({ id: "t3", member: "ghost", status: "sent", tick: 1, at: 5 })
+  ];
+  const result = deriveRelationships({ events, roomId: ROOM, asOfTick: 1 });
+  assert.deepEqual(observers(result), ["a1", "a2"]);
+  assert.deepEqual(result.pairs.map((pair) => `${pair.observer}->${pair.target}`),
+    ["a1->a1", "a1->a2", "a2->a1", "a2->a2"]);
+  assert.ok(result.pairs[0].derivedFrom.includes("ma1"), "the membership fact is part of the basis");
+});
+
+test("a member.removed event retires the observer row", () => {
+  const events = [
+    membership({ id: "ma1", sessionId: "a1", tick: 0, at: 1 }),
+    membership({ id: "ma2", sessionId: "a2", tick: 0, at: 2 }),
+    membership({ id: "mr2", sessionId: "a2", type: "member.removed", tick: 3, at: 3 }),
+    turn({ id: "t1", tick: 1, at: 4, roster: ["a1", "a2"] }),
+    message({ id: "t2", author: "a1", tick: 1, at: 5 })
+  ];
+  const result = deriveRelationships({ events, roomId: ROOM, asOfTick: 3 });
+  assert.deepEqual(observers(result), ["a1"]);
+  assert.deepEqual(result.pairs.map((pair) => `${pair.observer}->${pair.target}`), ["a1->a1"]);
+});
+
+test("a member who left and rejoined is an observer again", () => {
+  // Removal is a fact about a period, not a tombstone: a later add wins, which
+  // is what keeps a re-joined participant from being permanently invisible.
+  const events = [
+    membership({ id: "ma1", sessionId: "a1", tick: 0, at: 1 }),
+    membership({ id: "mr1", sessionId: "a1", type: "member.removed", tick: 2, at: 2 }),
+    membership({ id: "ma2", sessionId: "a1", type: "member.added", tick: 4, at: 4 })
+  ];
+  assert.deepEqual(observers(deriveRelationships({ events, roomId: ROOM, asOfTick: 1 })), ["a1"]);
+  assert.deepEqual(observers(deriveRelationships({ events, roomId: ROOM, asOfTick: 2 })), []);
+  assert.deepEqual(observers(deriveRelationships({ events, roomId: ROOM, asOfTick: 4 })), ["a1"]);
+});
+
+test("a member added on top of a pre-upgrade log does not erase the members already there", () => {
+  // The upgrade boundary inside one room: the pre-R41 part of the log still
+  // supplies its members, the events supply the ones that joined later, and a
+  // session named only by a post-upgrade roster is still not a member.
+  const events = [
+    turn({ id: "t8", tick: 1, at: 8, roster: ["o1", "o2"] }),
+    message({ id: "t2", author: "o1", tick: 1, at: 2 }),
+    membership({ id: "ma3", sessionId: "o3", tick: 5, at: 5 }),
+    turn({ id: "t9", tick: 6, at: 9, roster: ["o1", "o2", "o3", "ghost"] })
+  ];
+  const result = deriveRelationships({ events, roomId: ROOM, asOfTick: 6 });
+  assert.deepEqual(observers(result), ["o1", "o2", "o3"]);
+  assert.ok(result.derivedFrom.includes("t8"), "the pre-upgrade roster that supplied o1 and o2 is evidence");
+  assert.ok(result.derivedFrom.includes("ma3"));
+});
+
+test("a membership event beyond the horizon is not evidence on any path", () => {
+  // The R46 rule, applied to the new events: a snapshot as of tick 3 must not
+  // observe a member who joined at tick 9, nor count that add as its basis.
+  const events = [
+    membership({ id: "ma3", sessionId: "o3", tick: 9, at: 9 }),
+    membership({ id: "ma1", sessionId: "o1", tick: 1, at: 1 })
+  ];
+  const result = deriveRelationships({ events, roomId: ROOM, asOfTick: 3 });
+  assert.deepEqual(observers(result), ["o1"]);
+  assert.ok(!result.derivedFrom.includes("ma3"));
+  assert.deepEqual(observers(deriveRelationships({ events, roomId: ROOM, asOfTick: 9 })), ["o1", "o3"]);
+});
+
