@@ -542,6 +542,56 @@ test("the 600-character cap holds with appraisals in the merge, at any room size
   assert.ok(!noRoom.includes("（判断）"), "a block that cannot fit whole is left out, never cut");
 });
 
+test("an oversized perceived role is quoted short, not turned into a dropped judgement", () => {
+  // The claim beside the role was already capped; the role was not. A role of a
+  // few hundred characters pushed its line past the section cap, and the per-line
+  // fit check then removed exactly this member's judgement while a digest with no
+  // judgement at all was still returned — silent content loss from the
+  // experiment's independent variable.
+  const role = "角色".repeat(250);
+  const derived = { pairs: [{ observer: "s1", target: "s2", tick: 1, counters: { messagesAuthored: 2 } }] };
+  const appraisals = { s1: { s2: { appraisalId: "a1", stance: "trust", confidence: 0.7,
+    claim: "他说清楚了", perceivedRole: role, evidenceCount: 1, validFrom: 1, validTo: null } } };
+  const digest = relationshipDigest({ derived, observer: "s1", appraisals, labelOf: () => "乙" });
+  assert.ok(digest.includes("（判断）"), "the member's own judgement must not vanish");
+  assert.ok(digest.includes("他说清楚了"), "nor the claim it quotes");
+  assert.ok(!digest.includes(role), "the role is not quoted past its cap");
+  assert.ok(digest.includes(`${role.slice(0, 120)}…`), "it is quoted short, with an ellipsis");
+  assert.ok(digest.length <= RELATIONSHIP_DIGEST_MAX_CHARS, `${digest.length} characters`);
+});
+
+test("the judged block never arrives half-rendered, whatever the role and claim lengths", () => {
+  // Whole or not at all: with two judged counterparties, a heading carrying one
+  // judgement line and not the other is the partial block the rule forbids. The
+  // 460-character role is the one that used to trip the per-line check while the
+  // other line still rendered.
+  const cases = [
+    { role: 0, claim: 5 }, { role: 100, claim: 5 }, { role: 121, claim: 121 },
+    { role: 460, claim: 60 }, { role: 500, claim: 5 }, { role: 5000, claim: 5000 }
+  ];
+  for (const { role, claim } of cases) {
+    const derived = { pairs: [
+      { observer: "s1", target: "s2", tick: 1, counters: { messagesAuthored: 2 } },
+      { observer: "s1", target: "s3", tick: 2, counters: { messagesAuthored: 1 } }
+    ] };
+    const appraisals = { s1: {
+      s2: { appraisalId: "a1", stance: "trust", confidence: 0.7, claim: "甲".repeat(claim),
+        perceivedRole: role === 0 ? null : "角".repeat(role), evidenceCount: 1 },
+      s3: { appraisalId: "a2", stance: "distrust", confidence: 0.3, claim: "乙的说法", perceivedRole: null, evidenceCount: 2 }
+    } };
+    const label = `role ${role}/claim ${claim}`;
+    const digest = relationshipDigest({ derived, observer: "s1", appraisals,
+      labelOf: (id) => ({ s2: "甲", s3: "乙" })[id] });
+    assert.ok(digest.length <= RELATIONSHIP_DIGEST_MAX_CHARS, `${label}: ${digest.length} characters`);
+    const judgements = digest.split("\n").filter((line) => line.startsWith("（判断）"));
+    if (digest.includes("（判断）")) {
+      assert.equal(judgements.length, 2, `${label}: both judgements or neither`);
+    } else {
+      assert.equal(judgements.length, 0, `${label}: no judgement line without the block`);
+    }
+  }
+});
+
 test("the injected digest merges counts and judgements under one bounded section", async () => {
   const h = await bootPlugin();
   try {

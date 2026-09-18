@@ -145,7 +145,7 @@ test("the rendering algorithm's own source is part of the hash", () => {
   // The list is the whole rendering path, named, so a function added to the
   // algorithm without being listed here is a failure rather than a silent hole.
   assert.deepEqual(DIGEST_RENDERERS.map((renderer) => renderer.name).sort(),
-    ["digestAppraisalLine", "digestLabel", "digestRank", "fillTemplate", "positiveCount", "relationshipDigest", "renderDigest"]);
+    ["boundedQuote", "digestAppraisalLine", "digestLabel", "digestRank", "fillTemplate", "positiveCount", "relationshipDigest", "renderDigest"]);
   // And the fingerprint is a real term of the hash, not decoration beside it.
   const base = injectionConfigFor({ room: { policy: {} }, appraisalDigest: true });
   assert.equal(base.algorithm, digestAlgorithmFingerprint(DIGEST_RENDERERS));
