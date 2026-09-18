@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DshChatLocalService } from "../lib/room-store.js";
 import { verifyChain } from "../lib/event-log.js";
+import { deriveRelationships } from "../lib/relationship.js";
 
 async function waitFor(predicate, label = "condition") {
   const deadline = Date.now() + 2_000;
@@ -475,4 +476,181 @@ test("a delivery status change whose save never lands leaves no delivery event b
   assert.ok(settle, "the save that persisted the replied status must record it");
   assert.equal(settle.payload.previous, "working");
   assert.deepEqual(verifyChain(recorded), { ok: true, brokenAt: null });
+});
+
+/**
+ * A room whose members can each hold a live turn, so `operateWork` and the
+ * charter tools can be driven as a participant the way the tools drive them.
+ * Only the bridge is a stub: the ledger, the save path and the event log are
+ * the real ones, because the log is the subject.
+ */
+async function ledgerHarness() {
+  const directory = await mkdtemp(join(tmpdir(), "dcl-ledger-"));
+  const calls = [];
+  const ctx = {
+    sessions: { get: () => undefined },
+    sessionTitle: { get: () => undefined },
+    agents: { get: () => ({ cancel() {} }) },
+    dshBridge: { status: async () => ({ state: "idle" }),
+      deliverExternal: async (from, to, text, delivery) => { calls.push({ from, to, text, delivery }); } },
+    get(name) { return this[name]; }
+  };
+  const service = new DshChatLocalService(ctx, { path: join(directory, "rooms.json"),
+    maxRounds: 1, maxReplies: 1, replyTimeoutMs: 5_000, monitorIntervalMs: 3_600_000 });
+  await service.ready;
+  const room = await service.createRoom({ name: "台账事件", autoDeliver: true, members: [
+    { kind: "session", sessionId: "s1", alias: "记录" },
+    { kind: "session", sessionId: "s2", alias: "执行" },
+    { kind: "session", sessionId: "s3", alias: "复核" }] });
+  let operations = 0;
+  return {
+    directory, service, room, calls,
+    /** Open a live turn for one member and return the message it can cite. */
+    async activate(sessionId, text = "请核对台账并登记结论。") {
+      await service.stopRoom(room.id);
+      const index = calls.length;
+      const source = await service.send({ roomId: room.id, author: "human:me", authorKind: "human",
+        text, mentions: [sessionId] });
+      const call = await waitFor(() => calls[index], "a participant delivery");
+      const turn = index + 1;
+      await service.observeSessionEvent(call.to, { type: "turn/start", data: { turn } });
+      await service.observeSessionEvent(call.to, { type: "user/message", data: { content: [{ type: "text",
+        text: `[dsh-bridge dsh-chat-local-room message ${call.delivery.id} from ${call.from}]` }] } });
+      return source;
+    },
+    command(source, input = {}) {
+      return { operationId: `ledger-event-${++operations}`, sourceMessageIds: [source.id],
+        summary: "根据本轮讨论登记可核对的状态变化", ...input };
+    },
+    async cleanup() { await service.close(); await rm(directory, { recursive: true, force: true }); }
+  };
+}
+
+const TASK_FIELDS = { kind: "task", title: "核对统计口径", details: "对照原始报告逐项核对",
+  acceptanceCriteria: "列出原始出处、口径和页码", ownerSessionId: "s2", reviewerSessionId: "s3" };
+
+test("each work action appends exactly one ledger.transition typed to the state it wrote", async () => {
+  const h = await ledgerHarness();
+  try {
+    const source = await h.activate("s2");
+    let entry = await h.service.operateWork(h.room.id, "s2", h.command(source, { action: "record", fields: TASK_FIELDS }));
+    const entryId = entry.id;
+    const act = (input) => h.service.operateWork(h.room.id, "s2",
+      h.command(source, { entryId, expectedRevision: entry.revision, ...input }));
+    entry = await act({ action: "comment" });
+    entry = await act({ action: "amend", fields: { details: "对照原始报告与附录逐项核对" } });
+    entry = await act({ action: "acknowledge" });
+    entry = await act({ action: "progress", state: "blocked",
+      blocker: { kind: "file", summary: "正文无法读取", nextStep: "提供同版正文", filePaths: ["/example/manuscript.docx"] } });
+    entry = await act({ action: "progress", state: "in_progress" });
+    const submission = h.command(source, { action: "submit", entryId, expectedRevision: entry.revision, deliverable: "核对表 v2" });
+    entry = await h.service.operateWork(h.room.id, "s2", submission);
+    // A replayed operation must be as idempotent in the log as it is in state.
+    await h.service.operateWork(h.room.id, "s2", submission);
+    const reviewer = await h.activate("s3");
+    entry = await h.service.operateWork(h.room.id, "s3", h.command(reviewer, { action: "review", entryId,
+      expectedRevision: entry.revision, verdict: "approve" }));
+
+    const events = (await h.service.eventsFor(h.room.id)).filter((event) => event.type === "ledger.transition");
+    assert.deepEqual(events.map((event) => event.payload.action),
+      ["record", "comment", "amend", "acknowledge", "progress", "progress", "submit", "review"]);
+    // The payload is the entry this save wrote, not the command the caller sent.
+    assert.deepEqual(events.map((event) => event.payload.entryId), new Array(8).fill(entryId));
+    assert.deepEqual(events.map((event) => event.payload.revision), [1, 2, 3, 4, 5, 6, 7, 8]);
+    assert.deepEqual(events.map((event) => event.payload.status),
+      ["open", "open", "open", "in_progress", "blocked", "in_progress", "in_review", "done"]);
+    assert.deepEqual(events.map((event) => event.payload.kind), new Array(8).fill("task"));
+    assert.deepEqual(events.map((event) => event.payload.state),
+      [null, null, null, null, "blocked", "in_progress", null, null]);
+    assert.deepEqual(events.map((event) => event.payload.verdict), [null, null, null, null, null, null, null, "approve"]);
+    assert.deepEqual(events.map((event) => event.payload.ownerSessionId), new Array(8).fill("s2"));
+    assert.deepEqual(events.map((event) => event.payload.reviewerSessionId), new Array(8).fill("s3"));
+    assert.deepEqual(events.map((event) => event.payload.dispositionAction), new Array(8).fill(null));
+    // The full field list, spelled out: a renamed key is a research counter that
+    // reads a silent zero, so the shape is pinned rather than merely sampled.
+    // The log serialises in canonical (sorted) key order, so the comparison is
+    // sorted rather than an assertion about the writer's insertion order.
+    assert.deepEqual(Object.keys(events[0].payload).sort(), ["action", "dispositionAction", "entryId",
+      "kind", "ownerSessionId", "proposerSessionId", "replacesProposalId", "reviewerSessionId",
+      "revision", "state", "status", "verdict"]);
+  } finally { await h.cleanup(); }
+});
+
+test("a save that never lands leaves no ledger.transition behind it", async () => {
+  const h = await ledgerHarness();
+  try {
+    const transitions = async () => (await h.service.eventsFor(h.room.id))
+      .filter((event) => event.type === "ledger.transition");
+    // Replace the state file with a directory: every rename onto it fails, so
+    // the save that would have made this entry durable cannot succeed.
+    await rm(join(h.directory, "rooms.json"));
+    await mkdir(join(h.directory, "rooms.json"));
+    await assert.rejects(() => h.service.createLedgerEntry(h.room.id, { kind: "task", title: "不会落地",
+      ownerSessionId: "s2", reviewerSessionId: "s3" }));
+    // The transition is queued behind the save, so a save that never landed
+    // records nothing: recording it first (or on failure) would describe a
+    // revision that never reached disk (R20).
+    assert.deepEqual(await transitions(), []);
+    // Let a save land. The state it writes contains both entries, so both
+    // transitions appear — the queued one was held back, not dropped, which is
+    // what makes the empty log above a claim about the write rather than about
+    // an emitter that never ran.
+    await rm(join(h.directory, "rooms.json"), { recursive: true });
+    const second = await h.service.createLedgerEntry(h.room.id, { kind: "task", title: "会落地",
+      ownerSessionId: "s2", reviewerSessionId: "s3" });
+    const recorded = await transitions();
+    assert.equal(recorded.length, 2);
+    assert.equal(recorded[1].payload.entryId, second.id);
+    const ledger = await h.service.listLedger(h.room.id, { includeArchived: true });
+    assert.deepEqual(ledger.map((entry) => entry.id).sort(), recorded.map((event) => event.payload.entryId).sort());
+  } finally { await h.cleanup(); }
+});
+
+test("a charter proposal records its proposer, and a replacement names the proposal it replaced (R44)", async () => {
+  const h = await ledgerHarness();
+  try {
+    const firstSource = await h.activate("s2");
+    const memory = await h.service.roomMemory(h.room.id);
+    const original = await h.service.proposeCharter(h.room.id, "s2", { baseRevision: memory.profile.revision,
+      charter: "规则甲", reason: "初稿", sourceMessageIds: [firstSource.id] });
+    const secondSource = await h.activate("s3");
+    const replacement = await h.service.proposeCharter(h.room.id, "s3", { baseRevision: memory.profile.revision,
+      charter: "规则乙", reason: "取代初稿", sourceMessageIds: [secondSource.id], replacesProposalId: original.id });
+
+    const events = (await h.service.eventsFor(h.room.id)).filter((event) => event.type === "ledger.transition");
+    assert.equal(events.length, 2);
+    // The superseded counter attributes a replacement to the *replaced*
+    // proposal's proposer, so the replaced proposal's own record has to name
+    // that proposer and be keyed by the id the replacement cites.
+    assert.equal(events[0].payload.entryId, original.id);
+    assert.equal(events[0].payload.kind, "charter");
+    assert.equal(events[0].payload.action, "propose");
+    assert.equal(events[0].payload.proposerSessionId, "s2");
+    assert.equal(events[0].payload.replacesProposalId, null);
+    assert.equal(events[1].payload.entryId, replacement.id);
+    assert.equal(events[1].payload.proposerSessionId, "s3");
+    assert.equal(events[1].payload.replacesProposalId, original.id);
+  } finally { await h.cleanup(); }
+});
+
+test("a superseded charter proposal is counted from a real room log, not a silent zero (R44)", async () => {
+  const h = await ledgerHarness();
+  try {
+    const firstSource = await h.activate("s2");
+    const memory = await h.service.roomMemory(h.room.id);
+    const original = await h.service.proposeCharter(h.room.id, "s2", { baseRevision: memory.profile.revision,
+      charter: "规则甲", reason: "初稿", sourceMessageIds: [firstSource.id] });
+    const secondSource = await h.activate("s3");
+    await h.service.proposeCharter(h.room.id, "s3", { baseRevision: memory.profile.revision,
+      charter: "规则乙", reason: "取代初稿", sourceMessageIds: [secondSource.id], replacesProposalId: original.id });
+
+    // The end-to-end claim behind R44: the derivation reads these two field
+    // names off the emitted events, so a spelling mismatch shows up here as the
+    // silent zero the ruling exists to prevent.
+    const result = deriveRelationships({ events: await h.service.eventsFor(h.room.id), roomId: h.room.id });
+    const counters = (sessionId) => result.pairs.find((pair) => pair.observer === sessionId
+      && pair.target === sessionId)?.counters;
+    assert.equal(counters("s2").charterProposalsSuperseded, 1);
+    assert.equal(counters("s3").charterProposalsSuperseded, 0);
+  } finally { await h.cleanup(); }
 });
