@@ -700,6 +700,60 @@ test("runs are pooled only when their configuration matches, and a broken chain 
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
+test("runs whose models the runtime never reported are pooled with nothing", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "dcl-eval-models-"));
+  const statePath = join(directory, "rooms.json");
+  // What `#runModels` records when the runtime cannot report a model, and what it
+  // records when it can.
+  const unread = { s1: { provider: null, model: null } };
+  const known = { s1: { provider: "p", model: "m" } };
+  const runsFor = async (path, prefix, models) => {
+    for (let index = 1; index <= 10; index += 1) {
+      await writeLog(path, `${prefix}-${String(index).padStart(2, "0")}`, [
+        manifest({ tick: 1, models }),
+        event("injection.cost", 2, { deliveryId: `d${index}`, digestChars: 100 + index }),
+        event("delivery.settled", 2, { deliveryId: `d${index}`, member: "s1", status: "delivered" })
+      ]);
+    }
+  };
+  try {
+    await runsFor(statePath, "unread", unread);
+    const report = await evaluate({ statePath });
+    // Every run holds a real interaction, so the ten-run gate is not what refuses
+    // here — the pool key is.
+    assert.equal(report.runs.length, 10);
+    assert.ok(report.runs.every((run) => run.analysable), "the interaction gate is not what refuses here");
+    assert.ok(report.runs.every((run) => run.modelsKnown === false));
+    // Unknown models pool with nothing, each other included: "both models are
+    // unknown" is not evidence that they were the same model, and a group of one
+    // can never reach the gate. That is what makes "recorded as null rather than
+    // guessed" mean something at the evaluation.
+    assert.equal(report.groups.length, 10);
+    assert.ok(report.groups.every((group) => group.runCount === 1));
+    assert.ok(report.groups.every((group) => group.modelsKnown === false));
+    assert.ok(report.groups.every((group) => group.sufficient === false && group.statistics === null));
+    assert.equal(report.assertsConclusions, false);
+    assert.equal(report.status, "insufficient-sample");
+    const text = renderText(report);
+    assert.match(text, /models unknown \(not pooled with any other run\)/u);
+    assert.match(text, /this run's models are unknown, so it is pooled with no other run/u);
+    assert.ok(!/\bresult\b/u.test(text), "no line may be printed as a result");
+  } finally { await rm(directory, { recursive: true, force: true }); }
+  // The same ten runs with a model the runtime did report: one group, sufficient,
+  // conclusive. What refused above was the unread models, not the sample size.
+  const directory2 = await mkdtemp(join(tmpdir(), "dcl-eval-models-known-"));
+  const statePath2 = join(directory2, "rooms.json");
+  try {
+    await runsFor(statePath2, "known", known);
+    const report = await evaluate({ statePath: statePath2 });
+    assert.equal(report.groups.length, 1);
+    assert.equal(report.groups[0].runCount, 10);
+    assert.equal(report.groups[0].modelsKnown, true);
+    assert.equal(report.assertsConclusions, true);
+    assert.equal(report.status, "conclusive");
+  } finally { await rm(directory2, { recursive: true, force: true }); }
+});
+
 test("the run gate cannot be lowered, and a directory with no run exits 2", async () => {
   const { directory, statePath } = await stateWithRuns(2);
   try {

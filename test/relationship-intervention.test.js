@@ -50,7 +50,7 @@ async function harness(config = {}, { onDeliver } = {}) {
   await service.ready;
   const room = await service.createRoom({ name: "实验房间", autoDeliver: true,
     members: [{ kind: "session", sessionId: "s1", alias: "甲" }, { kind: "session", sessionId: "s2", alias: "乙" }] });
-  return { directory, service, room, calls,
+  return { directory, service, room, calls, ctx,
     close: async () => { await service.close(); await rm(directory, { recursive: true, force: true }); } };
 }
 
@@ -451,6 +451,15 @@ test("eleven runs in which one member turn happened are not a sample", async () 
     if (refusing) throw new Error("transport refused every delivery");
   } });
   try {
+    // A runtime that reports a model, so the eleven runs share one pool key. The
+    // shared harness reports none, and a run with unknown models is pooled with
+    // nothing at all (see the pool-key rule) — with those this test would refuse
+    // for a second reason and could no longer tell the two gates apart.
+    h.ctx.sessionQuery = { observeSession: async () => ({
+      header: { cwd: "/tmp" },
+      projections: { values: { modelSelection: { next: { provider: "test", model: "model" } } } },
+      [Symbol.dispose]() {}
+    }) };
     await h.service.startRun(h.room.id, { arm: "persistent", appliedBy: "human" });
     await runEpisode(h, "第一轮", "回复一");
     // Ten restarts, each one human message, each delivery refused outright.
@@ -473,6 +482,8 @@ test("eleven runs in which one member turn happened are not a sample", async () 
       "only the healthy episode's two deliveries ever reached a member");
     const manifests = await eventsOfType(h, RUN_MANIFEST_EVENT_TYPE);
     assert.equal(manifests.length, 11);
+    assert.ok(manifests.every((event) => event.payload.models.s1.model === "model"),
+      "the pool key must be able to certify the models, or this test proves nothing");
     const report = await evaluate({ statePath: join(h.directory, "rooms.json") });
     assert.equal(report.runs.length, 11, "every manifest-bearing segment is still reported");
     assert.equal(report.assertsConclusions, false, "one real member turn is not eleven observations");
@@ -481,7 +492,11 @@ test("eleven runs in which one member turn happened are not a sample", async () 
       [true, ...Array.from({ length: 10 }, () => false)]);
     assert.ok(report.runs.slice(1).every((run) => run.dependentVariables.unreachedInjections >= 1),
       "each refused run holds constructed injections no member ever received");
+    // One pool key for all eleven, so the refusal is the interaction gate: with
+    // the join removed, eleven analysable runs would satisfy it.
+    assert.equal(report.groups.length, 1);
     const group = report.groups[0];
+    assert.equal(group.modelsKnown, true);
     assert.equal(group.runCount, 11);
     assert.equal(group.analysableRunCount, 1, "only the run whose delivery reached the members counts");
     assert.equal(group.sufficient, false);

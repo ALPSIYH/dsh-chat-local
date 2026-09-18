@@ -123,9 +123,32 @@ function modelsKey(models) {
   return JSON.stringify(Object.keys(models).sort().map((member) => [member, models[member].provider, models[member].model]));
 }
 
-/** The pool key: runs that may be compared share all of this. */
+/**
+ * Whether the runtime reported a provider and a model for every member.
+ *
+ * `null` is what the writer records when the runtime could not report a member's
+ * model, and it is recorded rather than guessed so a reader can see that the
+ * model is unknown. The pool key is the thing that has to honour that: it exists
+ * to certify that two runs shared every condition, and it cannot certify a
+ * condition it never read.
+ */
+function modelsKnown(models) {
+  const members = Object.keys(models ?? {});
+  return members.length > 0 && members.every((member) => models[member]?.provider && models[member]?.model);
+}
+
+/**
+ * The pool key: runs that may be compared share all of this.
+ *
+ * The models term is a run's own manifest id when the models are unknown, so
+ * such a run is pooled with no other run at all — not with other unknown-model
+ * runs either, since "both models are unknown" is not evidence that they were
+ * the same. A group of one can never satisfy the `MIN_RUNS` gate, which is the
+ * point: an evaluation must not conclude from a condition it could not read.
+ */
 function groupKey(run) {
-  return JSON.stringify([run.arm, run.configHash, run.initialStateVersion, modelsKey(run.models)]);
+  const models = modelsKnown(run.models) ? modelsKey(run.models) : `unread:${run.manifestId}`;
+  return JSON.stringify([run.arm, run.configHash, run.initialStateVersion, models]);
 }
 
 /** Read every run the state directory holds, and everything that is not one. */
@@ -164,6 +187,7 @@ async function collectRuns(statePath, only, log = new EventLog(statePath)) {
       runs.push({ roomId, runIndex: position, manifestId: segment.manifestId, arm: segment.arm,
         configHash: segment.configHash, initialStateVersion: segment.initialStateVersion,
         startedAtTick: segment.startedAtTick, tickEnd: segment.tickEnd, models: segment.models,
+        modelsKnown: modelsKnown(segment.models),
         chain: chain.ok, analysable: hasInteraction(values), dependentVariables: values });
     }
   }
@@ -228,19 +252,26 @@ function groupsOf(runs, minRuns, observation) {
     const analysable = bucket.filter((run) => run.analysable);
     const sufficient = analysable.length >= minRuns;
     const first = bucket[0];
+    const known = modelsKnown(first.models);
     const group = { arm: first.arm, configHash: first.configHash, initialStateVersion: first.initialStateVersion,
-      modelsKey: modelsKey(first.models), models: first.models, runCount: bucket.length,
+      modelsKey: modelsKey(first.models), models: first.models, modelsKnown: known, runCount: bucket.length,
+      poolId: groupKey(first),
       analysableRunCount: analysable.length, sufficient,
       runIndexes: bucket.map((run) => ({ roomId: run.roomId, runIndex: run.runIndex, analysable: run.analysable })),
       statistics: sufficient ? statisticsFor(analysable) : null,
       observation: !sufficient && observation && analysable.length > 0 ? statisticsFor(analysable) : null };
     if (!sufficient) {
-      group.insufficientReason = `this group holds ${analysable.length} run(s) with an interaction; ${minRuns} are required before it states anything`;
+      // The reason a group cannot conclude says which gate stopped it. A group of
+      // one exists because its models are unknown, and the ten-run count is then
+      // not what an operator needs to hear: no sample size could fix it.
+      group.insufficientReason = !known
+        ? "this run's models are unknown, so it is pooled with no other run; the runtime must report every member's provider and model before any conclusion"
+        : `this group holds ${analysable.length} run(s) with an interaction; ${minRuns} are required before it states anything`;
     }
     groups.push(group);
   }
   // Deterministic order: largest group first, then by pool key.
-  groups.sort((a, b) => b.runCount - a.runCount || (groupKey(a) < groupKey(b) ? -1 : 1));
+  groups.sort((a, b) => b.runCount - a.runCount || (a.poolId < b.poolId ? -1 : 1));
   return groups;
 }
 
@@ -265,6 +296,7 @@ export async function evaluate({ statePath, roomId, minRuns = MIN_RUNS, observat
     source: config.source, relationshipVersion: config.relationshipVersion };
   const notes = [
     "Runs are pooled only when arm, injection config hash, state version and models all match.",
+    "A run whose models the runtime did not report (`null` provider/model) is pooled with no other run at all, unknown-model runs included: the pool key certifies comparability, and \"both models are unknown\" is not evidence that they were the same. Such a run can never reach the gate, so no conclusion is drawn from a condition the evaluation could not read.",
     `Only runs holding an interaction count toward the ${minRuns}-run gate: an interaction is an injection whose delivery reached the member (a \`delivery.settled\` reach status for the same \`deliveryId\`). A manifest-delimited segment in which no member turn was ever reached is a restart, and a run whose every delivery failed holds constructed injections and no member turn at all; neither states anything.`,
     "Every duration is measured in ticks, never in the event stamp `at`.",
     "A group reports sample variance (n-1) and is `null` for a single run.",
@@ -309,12 +341,21 @@ export function renderText(report) {
   for (const group of report.groups) {
     const stats = group.statistics ?? group.observation;
     lines.push("");
+    const members = Object.keys(group.models ?? {}).sort();
+    const models = group.modelsKnown
+      ? members.map((member) => `${member}=${group.models[member].provider}/${group.models[member].model}`).join(" ")
+      : "unknown (not pooled with any other run)";
     lines.push(`group arm=${group.arm} configHash=${group.configHash.slice(0, 12)}… stateVersion=${group.initialStateVersion}`);
+    lines.push(`  models ${models}`);
     lines.push(`  runs ${group.runCount} (${group.analysableRunCount} with an interaction)${group.sufficient ? " (sufficient)" : ` — ${group.insufficientReason}`}`);
     if (!stats) {
-      lines.push(group.analysableRunCount === 0
-        ? "  no statistics: this group's runs hold no interaction to analyse"
-        : "  no statistics: a conclusion needs more runs than this group holds");
+      // A group of one whose models are unknown has no statistics because the
+      // pool key refused to certify it, not because it holds no interaction.
+      lines.push(!group.modelsKnown
+        ? "  no statistics: this run's models are unknown, so it stands alone and cannot reach the gate"
+        : group.analysableRunCount === 0
+          ? "  no statistics: this group's runs hold no interaction to analyse"
+          : "  no statistics: a conclusion needs more runs than this group holds");
       continue;
     }
     const label = group.statistics ? "result" : "observation (not a conclusion)";
