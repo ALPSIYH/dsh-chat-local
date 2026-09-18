@@ -4,6 +4,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DshChatLocalService } from "../lib/room-store.js";
+import { verifyChain } from "../lib/event-log.js";
 
 async function waitFor(predicate, label = "condition") {
   const deadline = Date.now() + 2_000;
@@ -375,6 +376,12 @@ test("the settle the save persisted is recorded before the message.created that 
   // the reply may only be recorded by that save. Recording the reply first is
   // the R20 defect: a log entry describing state that had not reached disk.
   assert.ok(settled < created, `the settle (${settled}) must precede the created event (${created})`);
+  // Both entries are queued before that one save and flushed by it in queue
+  // order, so the reply follows the settle with nothing between them: the same
+  // save that persisted the replied status is the one that made the reply
+  // durable, and the log says so in that order.
+  assert.equal(created, settled + 1, "one save must flush the settle and then the reply it explains");
+  assert.deepEqual(verifyChain(events), { ok: true, brokenAt: null });
 });
 
 test("the message.created of a superseding send follows the settles that same save persisted", async (t) => {
@@ -418,4 +425,54 @@ test("a save that never lands leaves no message.created behind it", async () => 
   // #commitSend saves before it records; an event here would describe state that
   // never reached disk.
   assert.deepEqual(await h.service.eventsFor(h.room.id), []);
+});
+
+test("a delivery status change whose save never lands leaves no delivery event behind it", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "dcl-phantom-"));
+  const path = join(directory, "rooms.json");
+  const calls = [];
+  const ctx = { agents: { get: () => ({ cancel() {} }) },
+    dshBridge: { status: async () => ({ state: "idle" }),
+      deliverExternal: async (from, to, text, delivery) => { calls.push({ from, to, text, delivery }); } },
+    get(name) { return this[name]; } };
+  const service = new DshChatLocalService(ctx, { path, maxRounds: 1, replyTimeoutMs: 60_000 });
+  // Registered before any assertion: a failing assertion must not leave the
+  // long reply timer holding the test file open.
+  t.after(() => service.close());
+  await service.ready;
+  const room = await service.createRoom({ name: "幻影", autoDeliver: true,
+    members: [{ kind: "session", sessionId: "s1", alias: "甲" }] });
+  await service.send({ roomId: room.id, author: "human:me", authorKind: "human", text: "开始" });
+  const call = await waitFor(() => calls[0], "the member delivery");
+  await service.observeSessionEvent(call.to, { type: "turn/start", data: { turn: 1 } });
+  await service.observeSessionEvent(call.to, { type: "user/message", data: { content: [{ type: "text",
+    text: `[dsh-bridge dsh-chat-local-room message ${call.delivery.id} from ${call.from}]` }] } });
+  // `delivered` is this delivery's last status on disk, and the whole durable
+  // record the failed save below will be missing.
+  const onDisk = JSON.parse(await readFile(path, "utf8"));
+  assert.equal(onDisk.rooms[0].messages.flatMap((message) => message.deliveries)[0].status, "delivered");
+  // Replace the state file with a directory: every rename onto it fails, so the
+  // save that would persist the next status cannot land.
+  await rm(path);
+  await mkdir(path);
+  await assert.rejects(() => service.observeSessionEvent(call.to, { type: "assistant/message",
+    data: { turn: 1, step: 1, message: { content: [{ type: "text", text: "幻影回复" }] } } }));
+  // The status did change in memory...
+  const inMemory = (await service.messages(room.id)).flatMap((message) => message.deliveries);
+  assert.equal(inMemory.length, 1);
+  assert.equal(inMemory[0].status, "working");
+  // ...but no save made it durable, so the log must not explain it (R21). The
+  // events that did reach disk stop at the delivered status this room holds.
+  const events = await service.eventsFor(room.id);
+  assert.deepEqual(events.filter((event) => event.type.startsWith("delivery.")).map((event) => event.payload.status),
+    ["sent", "delivered"]);
+  // Drop the directory so the next save can land: the event then appears with
+  // the status, and the chain still verifies.
+  await rm(path, { recursive: true });
+  await service.observeSessionEvent(call.to, { type: "turn/end", data: { turn: 1, reason: { kind: "completed" } } });
+  const recorded = await service.eventsFor(room.id);
+  const settle = recorded.find((event) => event.type === "delivery.settled" && event.payload.status === "replied");
+  assert.ok(settle, "the save that persisted the replied status must record it");
+  assert.equal(settle.payload.previous, "working");
+  assert.deepEqual(verifyChain(recorded), { ok: true, brokenAt: null });
 });
