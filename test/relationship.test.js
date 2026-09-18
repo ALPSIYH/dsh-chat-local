@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { Readable } from "node:stream";
 import { DshChatLocalService } from "../lib/room-store.js";
 import { apply } from "../lib/index.js";
-import { RELATIONSHIP_VERSION, deriveRelationships, latestRelationships } from "../lib/relationship.js";
+import { RELATIONSHIP_VERSION, deriveRelationships, latestRelationships, effectiveAppraisals } from "../lib/relationship.js";
 
 /**
  * These tests build event envelopes by hand instead of driving a room, because
@@ -83,6 +83,15 @@ function charter({ id, tick, at, type = "charter.proposed", payload }) {
 /** A `member.added` / `member.removed` envelope: the shape the store now writes (R41). */
 function membership({ id, sessionId, type = "member.added", alias = sessionId, role = null, tick = 0, at = 0 }) {
   return event({ id, type, actor: "human:human:me", tick, at, payload: { sessionId, alias, role, at } });
+}
+
+/** An `appraisal` envelope as `#recordAppraisal` writes one. */
+function appraisalEvent({ id, tick, at = 0, observerId, aboutAgentId, stance = "trust", confidence = 0.5,
+  claim = "他说清楚了", perceivedRole = null, evidenceEventIds = ["e1"], validFrom, validTo = null,
+  action = "record" }) {
+  return event({ id, type: "appraisal", actor: `session:${observerId}`, tick, at,
+    payload: { observerId, aboutAgentId, stance, confidence, claim, perceivedRole, evidenceEventIds,
+      validFrom: validFrom ?? tick, validTo, action } });
 }
 
 /** An ordered `turn.scheduled` envelope, used as pre-R41 membership evidence. */
@@ -891,11 +900,13 @@ test("the tool returns only the calling session's own row, and refuses a non-mem
     const tool = plugin.registered.get("chat_relationships");
     assert.ok(tool, "the plugin registers chat_relationships");
     const own = await tool.execute({ room: room.id }, exec("s1"));
-    // Exactly one observer's row travels: the caller's, and nothing that could
-    // be mistaken for a second observer's view.
-    assert.deepEqual(Object.keys(own).sort(), ["observer", "targets"]);
+    // Exactly one observer's row travels: the caller's counters and the
+    // caller's own appraisals, and nothing that could be mistaken for a second
+    // observer's view.
+    assert.deepEqual(Object.keys(own).sort(), ["appraisals", "observer", "targets"]);
     assert.equal(own.observer, "s1");
     assert.deepEqual(own.targets, matrix.s1);
+    assert.deepEqual(own.appraisals, {});
     assert.equal("s2" in own, false);
     // The other member reaches only their own row, never the first one's.
     const theirs = await tool.execute({ room: room.id }, exec("s2"));
@@ -929,11 +940,13 @@ test("the tool reads through the one projection the route returns", async () => 
     service.relationships = async (roomId) => { projections.push(roomId); return project(roomId); };
     service.eventLog.read = async (roomId) => { reads.push(roomId); return read(roomId); };
     const row = await service.relationshipRow(room.id, "s1");
-    // One projection, one log read: the tool's row is a selection out of what
-    // the route returns, not a second derivation.
+    // One projection and two reads of the same room's log: the row is a
+    // selection out of what the route returns, and the appraisals beside it come
+    // from the same log rather than from the projection — the projection carries
+    // what the snapshots stated, and an appraisal is never in a snapshot.
     assert.deepEqual(projections, [room.id]);
-    assert.deepEqual(reads, [room.id]);
-    assert.deepEqual(row, { observer: "s1", targets: { s1: ALL_ZERO } });
+    assert.deepEqual(reads, [room.id, room.id]);
+    assert.deepEqual(row, { observer: "s1", targets: { s1: ALL_ZERO }, appraisals: {} });
     const matrix = await service.relationships(room.id);
     assert.deepEqual(row.targets, matrix.s1);
   } finally {
@@ -943,11 +956,11 @@ test("the tool reads through the one projection the route returns", async () => 
 });
 
 test("the tool selects the caller's own row, not the first observer's", async () => {
-  // Today the real projection gives every observer the same numbers for one
-  // target, so comparing the tool's row against `matrix.s1` cannot tell "my row"
-  // from "whoever's row came first". A stub with distinct per-observer counters
-  // can, and that is the claim under test: the selection is keyed by the calling
-  // session. The prototype is patched so the patch reaches the registry inside
+  // The real projection gives every observer the same counters for one target —
+  // they are read from the room's event record alone — so comparing the tool's
+  // row against `matrix.s1` cannot tell "my row" from "whoever's row came
+  // first". A stub with distinct per-observer counters can, and that is the
+  // claim under test: the selection is keyed by the calling session. The prototype is patched so the patch reaches the registry inside
   // `apply`, and restored in `finally` so no other test can see it.
   const project = DshChatLocalService.prototype.relationships;
   DshChatLocalService.prototype.relationships = async () => ({
@@ -960,9 +973,9 @@ test("the tool selects the caller's own row, not the first observer's", async ()
     const room = await plugin.request("/rooms", { name: "取行", autoDeliver: false,
       members: [{ kind: "session", sessionId: "s1", alias: "甲" }, { kind: "session", sessionId: "s2", alias: "乙" }] });
     const tool = plugin.registered.get("chat_relationships");
-    assert.deepEqual(await tool.execute({ room: room.id }, exec("s2")), { observer: "s2", targets: {
+    assert.deepEqual(await tool.execute({ room: room.id }, exec("s2")), { observer: "s2", appraisals: {}, targets: {
       s1: { ...ALL_ZERO, messagesAuthored: 21 }, s2: { ...ALL_ZERO, messagesAuthored: 22 } } });
-    assert.deepEqual(await tool.execute({ room: room.id }, exec("s1")), { observer: "s1", targets: {
+    assert.deepEqual(await tool.execute({ room: room.id }, exec("s1")), { observer: "s1", appraisals: {}, targets: {
       s1: { ...ALL_ZERO, messagesAuthored: 11 }, s2: { ...ALL_ZERO, messagesAuthored: 12 } } });
   } finally {
     // Restored before the close, not after: a rejecting `close()` would
@@ -982,7 +995,7 @@ test("a room with no snapshot projects nothing, and neither surface appends an e
     assert.deepEqual(await plugin.request(`/rooms/${room.id}/relationships`), {},
       "no snapshot means no current relationship, not an invented table");
     const tool = plugin.registered.get("chat_relationships");
-    assert.deepEqual(await tool.execute({ room: room.id }, exec("s1")), { observer: "s1", targets: {} });
+    assert.deepEqual(await tool.execute({ room: room.id }, exec("s1")), { observer: "s1", targets: {}, appraisals: {} });
     assert.equal(JSON.stringify(await eventsOf(plugin, room.id)), before,
       "a read-only surface must not append to the log it reads");
   } finally { await plugin.close(); }
@@ -999,11 +1012,11 @@ test("a missing or unreadable log degrades to an empty projection instead of fai
     // A room whose log is simply absent: no relationship state is readable.
     await rm(logPath, { force: true });
     assert.deepEqual(await plugin.request(`/rooms/${room.id}/relationships`), {});
-    assert.deepEqual(await tool.execute({ room: room.id }, exec("s1")), { observer: "s1", targets: {} });
+    assert.deepEqual(await tool.execute({ room: room.id }, exec("s1")), { observer: "s1", targets: {}, appraisals: {} });
     // A log that is present but cannot be parsed: same empty answer, still no 500.
     await writeFile(logPath, "this is not an event\n", "utf8");
     assert.deepEqual(await plugin.request(`/rooms/${room.id}/relationships`), {});
-    assert.deepEqual(await tool.execute({ room: room.id }, exec("s1")), { observer: "s1", targets: {} });
+    assert.deepEqual(await tool.execute({ room: room.id }, exec("s1")), { observer: "s1", targets: {}, appraisals: {} });
   } finally { await plugin.close(); }
 });
 
@@ -1029,4 +1042,104 @@ test("chat_relationships stays available in a restricted group turn", async () =
     await service.close();
     await rm(directory, { recursive: true, force: true });
   }
+});
+
+/**
+ * The A overlay's pure projection. The writer's own rules are pinned in
+ * `appraisal.test.js` by driving a real room; here the questions are the ones
+ * only a hand-built log can ask — what an interval means at its boundaries,
+ * that a revocation is a statement rather than a deletion, and that neither the
+ * counters nor their evidence basis can see an appraisal at all.
+ */
+
+test("an appraisal event changes no counter and enters no pair's evidence basis", () => {
+  const before = deriveRelationships({ events: log(), roomId: ROOM, asOfTick: 8 });
+  const appraised = [...log(),
+    appraisalEvent({ id: "a1", tick: 5, observerId: "o1", aboutAgentId: "o2" }),
+    appraisalEvent({ id: "a2", tick: 6, observerId: "o1", aboutAgentId: "r1", stance: "distrust" })];
+  const after = deriveRelationships({ events: appraised, roomId: ROOM, asOfTick: 8 });
+  // Byte-identical, not merely equal: the derivation did not read the event at
+  // all, so it cannot have raised a tick or noted an id either.
+  assert.equal(JSON.stringify(after), JSON.stringify(before));
+  for (const pair of after.pairs) {
+    assert.ok(!pair.derivedFrom.includes("a1"));
+    assert.ok(!pair.derivedFrom.includes("a2"));
+  }
+});
+
+test("an appraisal is in force from the tick it states until the tick of its revocation", () => {
+  const events = [
+    appraisalEvent({ id: "a1", tick: 5, observerId: "o1", aboutAgentId: "o2", validFrom: 5 }),
+    // The revocation repeats the statement and closes the interval at its own
+    // tick, which is the first tick the statement is no longer in force.
+    appraisalEvent({ id: "a2", tick: 9, observerId: "o1", aboutAgentId: "o2", validFrom: 5, validTo: 9, action: "revoke" })
+  ];
+  const at = (tick) => effectiveAppraisals(events, ROOM, tick);
+  assert.equal(at(4).o1?.o2, undefined, "a statement is not in force before it was made");
+  assert.equal(at(5).o1.o2.claim, "他说清楚了", "it is in force from the tick it states");
+  assert.equal(at(8).o1.o2.claim, "他说清楚了", "and stays in force up to the revocation's tick");
+  assert.equal(at(9).o1.o2, null, "validTo is the first tick it is no longer in force");
+  assert.equal(at(20).o1.o2, null, "and every tick after it");
+  // The projection reports the pair's current state, never the retired record:
+  // the claim does not travel once the interval has closed.
+  assert.ok(!JSON.stringify(at(9)).includes("他说清楚了"));
+});
+
+test("a newer appraisal replaces the older one, and a revoked pair can be judged again", () => {
+  const events = [
+    appraisalEvent({ id: "a1", tick: 1, observerId: "o1", aboutAgentId: "o2", claim: "第一版", validFrom: 1 }),
+    appraisalEvent({ id: "a2", tick: 2, observerId: "o1", aboutAgentId: "o2", stance: "distrust", claim: "第二版", validFrom: 2 }),
+    appraisalEvent({ id: "a3", tick: 3, observerId: "o1", aboutAgentId: "o2", validFrom: 2, validTo: 3, action: "revoke" }),
+    appraisalEvent({ id: "a4", tick: 3, observerId: "o1", aboutAgentId: "o2", stance: "neutral", claim: "第三版", validFrom: 3 })
+  ];
+  assert.equal(effectiveAppraisals(events, ROOM, 1).o1.o2.claim, "第一版");
+  assert.equal(effectiveAppraisals(events, ROOM, 2).o1.o2.claim, "第二版");
+  // The revocation closes the second statement; the third one is recorded at the
+  // same tick and takes its place, so the pair is judged again rather than
+  // tombstoned.
+  assert.equal(effectiveAppraisals(events, ROOM, 3).o1.o2.claim, "第三版");
+  // Each observer's judgements are their own: r1 has none, so the key is absent
+  // rather than an empty row that could read as "no judgement" for o1.
+  const projection = effectiveAppraisals(events, ROOM, 3);
+  assert.deepEqual(Object.keys(projection), ["o1"]);
+  assert.equal(projection.o1.r1, undefined);
+});
+
+test("two projections of one log are byte-identical and independent of array order", () => {
+  const events = [...log(),
+    appraisalEvent({ id: "a1", tick: 1, observerId: "o1", aboutAgentId: "o2" }),
+    appraisalEvent({ id: "a2", tick: 2, observerId: "o2", aboutAgentId: "o1", stance: "neutral" }),
+    appraisalEvent({ id: "a3", tick: 3, observerId: "o1", aboutAgentId: "o2", validFrom: 1, validTo: 3, action: "revoke" })];
+  const first = effectiveAppraisals(events, ROOM, 8);
+  const second = effectiveAppraisals(events, ROOM, 8);
+  assert.equal(JSON.stringify(first), JSON.stringify(second));
+  const reversed = events.map((item) => ({
+    hash: item.hash, prev: item.prev, provenance: item.provenance, causes: item.causes,
+    payload: item.payload, actor: item.actor, type: item.type, tick: item.tick,
+    at: item.at, id: item.id, v: item.v
+  })).reverse();
+  assert.equal(JSON.stringify(effectiveAppraisals(reversed, ROOM, 8)), JSON.stringify(first));
+});
+
+test("an appraisal statement this module cannot read is skipped rather than guessed at", () => {
+  const malformed = [
+    appraisalEvent({ id: "a1", tick: 1, observerId: "o1", aboutAgentId: "o2", stance: "superb" }),
+    appraisalEvent({ id: "a2", tick: 2, observerId: "o1", aboutAgentId: "o2", confidence: 2 }),
+    appraisalEvent({ id: "a3", tick: 3, observerId: "o1", aboutAgentId: "o2", confidence: Number.NaN }),
+    appraisalEvent({ id: "a4", tick: 4, observerId: "o1", aboutAgentId: "o2", claim: "" }),
+    appraisalEvent({ id: "a5", tick: 5, observerId: "", aboutAgentId: "o2" }),
+    appraisalEvent({ id: "a6", tick: 6, observerId: "o1", aboutAgentId: "o2", action: "maybe" })
+  ];
+  assert.deepEqual(effectiveAppraisals(malformed, ROOM, 10), {});
+});
+
+test("an appraisal from another room never leaks into this room's projection", () => {
+  const foreign = log().map((item, index) => ({
+    ...item, id: `x${index}`, provenance: { ...item.provenance, roomId: OTHER_ROOM }
+  }));
+  foreign.push({ ...appraisalEvent({ id: "fa", tick: 1, observerId: "o1", aboutAgentId: "o2" }),
+    provenance: { roomId: OTHER_ROOM } });
+  const own = effectiveAppraisals(log(), ROOM, 8);
+  const mixed = effectiveAppraisals([...log(), ...foreign], ROOM, 8);
+  assert.deepEqual(mixed, own);
 });
