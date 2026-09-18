@@ -704,3 +704,48 @@ test("a room driven through the writer derives its observers from membership eve
     assert.deepEqual([...new Set(result.pairs.map((pair) => pair.observer))], ["s2", "s3", "s4"]);
   } finally { await h.cleanup(); }
 });
+
+test("every relationship counter that reads a ledger transition is fed by a real room", async () => {
+  // The six counters that consume `ledger.transition` were structurally
+  // unfeedable before this task: nothing emitted the event, so each would have
+  // read a silent zero forever. This drives a room through each shape at once
+  // and derives from the log it actually wrote.
+  const h = await ledgerHarness();
+  try {
+    const owner = await h.activate("s2");
+    const task = (title) => ({ kind: "task", title, details: "对照原始报告逐项核对",
+      acceptanceCriteria: "列出原始出处、口径和页码", ownerSessionId: "s2", reviewerSessionId: "s3" });
+    let first = await h.service.operateWork(h.room.id, "s2", h.command(owner, { action: "record", fields: task("甲事项") }));
+    const asOwner = (entry, input) => h.service.operateWork(h.room.id, "s2",
+      h.command(owner, { entryId: entry.id, expectedRevision: entry.revision, ...input }));
+    first = await asOwner(first, { action: "acknowledge" });
+    first = await asOwner(first, { action: "progress", state: "blocked",
+      blocker: { kind: "file", summary: "正文无法读取", nextStep: "提供同版正文" } });
+    // A resume retires exactly one blocked report, which is `blockedConfirmed`.
+    first = await asOwner(first, { action: "progress", state: "in_progress" });
+    first = await asOwner(first, { action: "submit", deliverable: "甲核对表 v1" });
+    let second = await h.service.operateWork(h.room.id, "s2", h.command(owner, { action: "record", fields: task("乙事项") }));
+    second = await asOwner(second, { action: "acknowledge" });
+    second = await asOwner(second, { action: "submit", deliverable: "乙核对表 v1" });
+    // A dispute that is recorded and never closed counts as unresolved; its
+    // owner is the member the disagreement is attributed to.
+    const dispute = await h.service.operateWork(h.room.id, "s2", h.command(owner, { action: "record",
+      fields: { kind: "dispute", title: "口径存在分歧", details: "两版阈值不一致，等待裁定", ownerSessionId: "s2" } }));
+
+    const reviewer = await h.activate("s3");
+    const asReviewer = (entry, verdict) => h.service.operateWork(h.room.id, "s3",
+      h.command(reviewer, { action: "review", entryId: entry.id, expectedRevision: entry.revision, verdict }));
+    await asReviewer(first, "approve");
+    await asReviewer(second, "request_changes");
+
+    const result = deriveRelationships({ events: await h.service.eventsFor(h.room.id), roomId: h.room.id });
+    const counters = (target) => result.pairs.find((pair) => pair.observer === "s1"
+      && pair.target === target)?.counters;
+    assert.equal(counters("s2").blockedReports, 1);
+    assert.equal(counters("s2").blockedConfirmed, 1);
+    assert.equal(counters("s2").unresolvedDisagreements, 1);
+    assert.equal(counters("s3").reviewsApproved, 1);
+    assert.equal(counters("s3").reviewsChangesRequested, 1);
+    assert.equal(dispute.kind, "dispute");
+  } finally { await h.cleanup(); }
+});
