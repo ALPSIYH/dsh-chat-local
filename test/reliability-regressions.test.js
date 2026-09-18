@@ -214,6 +214,30 @@ test('a marker with no tracked turn still settles, records delivered, and arms t
   assert.match(denial,/Host 已拒绝/);
 });
 
+test('an assistant message with no turn cannot settle a delivery the member never received',async t=>{
+  const h=await harness();t.after(()=>h.service.close());
+  const room=await h.room('无回合的伪投递');
+  await h.send(room.id,'不该被当成已到达');await waitFor(()=>h.calls.length===1);
+  const call=h.calls[0];
+  // The transport accepted the prompt (`sent`), but the member's session never
+  // reported the marker and no `turn/start` was observed: there is no turn this
+  // event can be attributed to. A capture whose own turn is still unset must not
+  // be matched by an event that names no turn either — `undefined === undefined`
+  // is not a turn match.
+  assert.equal([...h.service.pending.values()][0].turn,undefined,'the fixture must leave the capture untracked');
+  await h.service.observeSessionEvent('s1',{type:'assistant/message',data:{step:1,
+    message:{content:[{type:'text',text:'与本次投递无关的原生输出'}]}}});
+  await h.service.observeSessionEvent('s1',{type:'turn/end',data:{reason:{kind:'completed'}}});
+  const events=await h.service.eventsFor(room.id);
+  const reached=events.filter(event=>event.type==='delivery.settled'
+    &&event.payload.deliveryId===call.delivery.id
+    &&['delivered','working','replied','passed'].includes(event.payload.status));
+  assert.deepEqual(reached,[],'a delivery whose marker was never observed must not settle as reached');
+  const delivery=h.service.state.rooms.find(item=>item.id===room.id).messages
+    .flatMap(message=>message.deliveries??[]).find(item=>item.id===call.delivery.id);
+  assert.equal(delivery.status,'sent','the transport status must be the only one this delivery holds');
+});
+
 test('an unactivated queued timeout does not cancel another native Session turn',async t=>{
   const h=await harness({replyTimeoutMs:250});t.after(()=>h.service.close());const room=await h.room('排队超时');
   await h.send(room.id,'排队');await waitFor(()=>h.calls.length===1);
