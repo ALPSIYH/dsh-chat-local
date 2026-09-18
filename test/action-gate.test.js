@@ -459,6 +459,50 @@ test("the policy notice states what changed, and a re-applied preset claims no c
   }
 });
 
+/**
+ * The one call that takes no risk confirmation is a call that moves only the
+ * room's gate inside a mode the user has already confirmed. The gate is not a
+ * permission, so that call names no execution change at all. Every other call
+ * that names an execution mode is decided exactly as it was before the gate
+ * existed, including a mode merely re-sent and a native preset merely
+ * re-applied.
+ */
+test("only a gate-only change inside an already-confirmed mode takes no risk confirmation", async () => {
+  const h = await harness("门单独");
+  try {
+    // The mode the user has explicitly confirmed. Naming an execution mode took
+    // the confirmation here, exactly as it always did.
+    await h.service.setRoomPolicy(h.room.id, { defaultActionMode: "inherit_dsh", expectedRevision: 1, confirmRisk: true });
+    const confirmed = await h.service.resolveRoom(h.room.id);
+    // The exception: the call moves the gate alone, so it needs no confirmation.
+    const toggled = await h.service.setRoomPolicy(h.room.id, { defaultActionMode: "inherit_dsh",
+      expectedRevision: confirmed.policy.revision, gate: true });
+    assert.equal(toggled.policy.gate, true);
+    assert.equal(toggled.policy.defaultActionMode, "inherit_dsh");
+    assert.equal(toggled.policy.revision, confirmed.policy.revision + 1);
+    // Turning it back off is the same call and the same exception.
+    const off = await h.service.setRoomPolicy(h.room.id, { defaultActionMode: "inherit_dsh",
+      expectedRevision: toggled.policy.revision, gate: false });
+    assert.equal(off.policy.gate, undefined);
+    assert.equal(off.policy.defaultActionMode, "inherit_dsh");
+    // The exception is only the gate: a call that also moves the mode still
+    // refuses without the confirmation, so the gate is not a way around it.
+    await assert.rejects(h.service.setRoomPolicy(h.room.id, { defaultActionMode: "workspace_write",
+      expectedRevision: off.policy.revision, gate: true }), /explicit risk confirmation/);
+    // So does naming an execution mode whose native preset would be re-applied
+    // in the same call.
+    await assert.rejects(h.service.setRoomPolicy(h.room.id, { defaultActionMode: "full_access",
+      expectedRevision: off.policy.revision, gate: true }), /explicit risk confirmation/);
+    // Neither refused call moved anything.
+    const after = await h.service.resolveRoom(h.room.id);
+    assert.equal(after.policy.revision, off.policy.revision);
+    assert.equal(after.policy.defaultActionMode, "inherit_dsh");
+    assert.equal(after.policy.gate, undefined);
+  } finally {
+    await h.close();
+  }
+});
+
 test("with the gate off, a whole turn behaves exactly as it did before the gate existed", async () => {
   const { h, lock } = await gatedTurn();
   try {
