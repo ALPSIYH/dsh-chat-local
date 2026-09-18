@@ -227,6 +227,31 @@ test("a replace whose anchor write fails still chains the next append onto the r
   assert.deepEqual(verifyChain(lines), { ok: true, brokenAt: null });
 });
 
+test("a replace whose anchor write fails still resumes the at guard from the restored log", async () => {
+  const { log, path } = await temporaryLog();
+  const now = 1_000;
+  // One pre-restore line at the frozen clock, so the cache the reset must
+  // overwrite holds a stamp near the wall clock, far below the restored tail.
+  await withFrozenClock(now, () => log.append("r1", { type: "a",
+    actor: { kind: "system", id: "system" }, payload: {}, provenance: { roomId: "r1" } }));
+  const restored = createEvent({ type: "restored", actor: { kind: "system", id: "system" },
+    payload: {}, at: 9_000_000_000_000 });
+  // Occupy the anchor path: `replace` renames the restored log into place and
+  // fails only at the anchor write, so the reset is on the failing path. A reset
+  // placed after the anchor would never run here at all.
+  await rm(`${path}.head`);
+  await mkdir(`${path}.head`);
+  await assert.rejects(() => log.replace("r1", [restored]));
+  await rm(`${path}.head`, { recursive: true });
+  const appended = await withFrozenClock(now, () => log.append("r1", { type: "after",
+    actor: { kind: "system", id: "system" }, payload: {}, provenance: { roomId: "r1" } }));
+  // The log on disk is the restored one, so the next stamp follows its tail. A
+  // reset after the anchor leaves the guard on the pre-restore stamp and stamps
+  // this append at the wall clock, i.e. below the event it is appended after.
+  assert.equal(appended.at, 9_000_000_000_001);
+  assert.deepEqual((await log.read("r1")).map((event) => event.at), [9_000_000_000_000, 9_000_000_000_001]);
+});
+
 test("an append onto a truncated log is refused and counted, never healed into a fork", async () => {
   const { directory, log, path } = await temporaryLog();
   await log.append("r1", { type: "a", actor: { kind: "system", id: "system" }, payload: {} });
