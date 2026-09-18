@@ -25,6 +25,8 @@ export declare class DshChatLocalService {
   messages(roomId: string, limit?: number): Promise<any[]>;
   messageContext(roomId: string, messageId: string, radius?: number): Promise<any[]>;
   searchMessages(roomId: string, input?: any): Promise<any[]>;
+  relationships(roomId: string): Promise<Record<string, Record<string, any>>>;
+  relationshipRow(roomId: string, sessionId: string): Promise<any>;
   resolveRoom(reference: string): Promise<any>;
   createRoom(input: any): Promise<any>;
   setRoomAutoDeliver(roomId: string, enabled: boolean): Promise<any>;

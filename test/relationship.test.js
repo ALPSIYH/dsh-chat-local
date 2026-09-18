@@ -1,5 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { Readable } from "node:stream";
+import { DshChatLocalService } from "../lib/room-store.js";
+import { apply } from "../lib/index.js";
 import { RELATIONSHIP_VERSION, deriveRelationships, latestRelationships } from "../lib/relationship.js";
 
 /**
@@ -11,6 +17,13 @@ import { RELATIONSHIP_VERSION, deriveRelationships, latestRelationships } from "
  * `reviewerSessionId`, `verdict`, `state`, `dispositionAction`,
  * `proposerSessionId`, `replacesProposalId`), so they are the event shapes this
  * module will consume once that task lands.
+ *
+ * The section at the end of this file is different in kind: it boots the real
+ * plugin and drives its own HTTP handler and tool registry, because the two
+ * read-only surfaces are a route and a tool rather than a pure function. There
+ * the expected value is computed with the pure functions above out of the log
+ * the plugin itself exports, so the surfaces are compared against the same
+ * definition they are supposed to expose.
  */
 
 const ROOM = "room-1";
@@ -727,3 +740,244 @@ test("input the projection cannot interpret is refused rather than guessed at", 
   assert.throws(() => latestRelationships([], ""), TypeError);
 });
 
+/**
+ * The read-only surfaces: `GET /rooms/:id/relationships` and the
+ * `chat_relationships` tool.
+ *
+ * Unlike the rest of this file, these tests boot the real plugin and drive its
+ * own request handler and tool registry, because the units under test are a
+ * route and a tool. The expected value is never hand-written: it is
+ * `latestRelationships` over the log the plugin itself exports through
+ * `GET /rooms/:id/snapshot`, so a surface that disagrees with the sanctioned
+ * projection fails here.
+ */
+
+async function waitFor(predicate, label) {
+  const deadline = Date.now() + 3_000;
+  while (Date.now() < deadline) {
+    const value = await predicate();
+    if (value) return value;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`timed out waiting for ${label}`);
+}
+
+/** The actor every `chat_*` tool derives from the DSH execution context. */
+function exec(sessionId) {
+  return { agent: { session: { id: sessionId } } };
+}
+
+/**
+ * Boot the plugin against one temporary state file and return the handler and
+ * tool registry it registered, plus a request helper that reads the JSON
+ * envelope exactly as a client would.
+ */
+async function bootPlugin() {
+  const directory = await mkdtemp(join(tmpdir(), "dcl-relationship-surfaces-"));
+  const disposers = [];
+  const registered = new Map();
+  const calls = [];
+  let handler, observe;
+  const ctx = {
+    effect(fn) { const dispose = fn(); if (typeof dispose === "function") disposers.push(dispose); },
+    on(name, fn) { assert.equal(name, "session/event"); observe = fn; },
+    tools: { register(tool) { registered.set(tool.name, tool); }, guard() {} },
+    webServer: { register(route) { handler = route.handler; } },
+    sessionTitle: { get() {} },
+    sessions: { get() { return { header: { cwd: directory } }; } },
+    agents: { get() {} },
+    dshBridge: { status: async () => ({ state: "idle" }),
+      deliverExternal: async (from, to, text, delivery) => { calls.push({ from, to, text, delivery }); } },
+    get(name) { return this[name]; }
+  };
+  apply(ctx, { path: join(directory, "rooms.json"), maxRounds: 1, replyTimeoutMs: 800 });
+  const request = async (path, body) => {
+    const req = Readable.from(body === undefined ? [] : [Buffer.from(JSON.stringify(body))]);
+    req.url = `/api/dsh-chat-local${path}`;
+    req.method = body === undefined ? "GET" : "POST";
+    let status, text;
+    await handler(req, { writeHead(code) { status = code; }, end(body2) { text = body2; } });
+    assert.equal(status, 200, text);
+    const parsed = JSON.parse(text);
+    assert.equal(parsed.ok, true, parsed.error);
+    return parsed.value;
+  };
+  return {
+    directory, registered, calls, request,
+    /** One DSH session event, as the harness observes it. */
+    sessionEvent: (sessionId, event) => observe({ id: sessionId }, event),
+    close: async () => { for (const dispose of disposers.reverse()) await dispose();
+      await rm(directory, { recursive: true, force: true }); }
+  };
+}
+
+/** The room's own log, read through the plugin's run-snapshot export. */
+async function eventsOf(plugin, roomId) {
+  const snapshot = await plugin.request(`/rooms/${roomId}/snapshot`);
+  return JSON.parse(snapshot.content).events;
+}
+
+/** Drive one delivered member through a complete turn, as DSH reports it. */
+async function driveReply(plugin, call, text) {
+  await plugin.sessionEvent(call.to, { type: "turn/start", data: { turn: 1 } });
+  await plugin.sessionEvent(call.to, { type: "user/message", data: { content: [{ type: "text",
+    text: `[dsh-bridge dsh-chat-local-room message ${call.delivery.id} from ${call.from}]` }] } });
+  await plugin.sessionEvent(call.to, { type: "assistant/message", data: { turn: 1, step: 1,
+    message: { content: [{ type: "text", text }] } } });
+  await plugin.sessionEvent(call.to, { type: "turn/end", data: { turn: 1, reason: { kind: "completed" } } });
+}
+
+/**
+ * Two members and two scheduled turns. The second turn's snapshot already sees
+ * the first turn's reply, so the projection the surfaces expose carries a
+ * non-zero counter — a table of zeros could not tell a working surface from one
+ * that returns a constant.
+ */
+async function twoTurnRoom(plugin) {
+  const room = await plugin.request("/rooms", { name: "关系面", autoDeliver: true,
+    members: [{ kind: "session", sessionId: "s1", alias: "甲" }, { kind: "session", sessionId: "s2", alias: "乙" }] });
+  await plugin.request(`/rooms/${room.id}/messages`, { author: "human:me", authorKind: "human",
+    text: "第一轮", mentions: ["s1"] });
+  const call = await waitFor(() => plugin.calls[0], "the first delivery");
+  await driveReply(plugin, call, "回复");
+  await waitFor(async () => (await plugin.request(`/rooms/${room.id}`)).orchestration?.state === "idle", "the turn to end");
+  await plugin.request(`/rooms/${room.id}/messages`, { author: "human:me", authorKind: "human",
+    text: "第二轮", mentions: ["s1"] });
+  await waitFor(async () => (await eventsOf(plugin, room.id))
+    .filter((event) => event.type === "relationship.snapshot").length >= 2, "the second snapshot");
+  return room;
+}
+
+test("the route returns the full projected matrix the log states", async () => {
+  const plugin = await bootPlugin();
+  try {
+    const room = await twoTurnRoom(plugin);
+    const projected = latestRelationships(await eventsOf(plugin, room.id), room.id);
+    assert.equal(projected.s1.s1.messagesAuthored, 1, "the fixture must carry a non-zero counter");
+    const route = await plugin.request(`/rooms/${room.id}/relationships`);
+    // The route is the projection, not a re-derivation and not a reshape: the
+    // same object the pure module returns over the room's own log.
+    assert.deepEqual(route, projected);
+    assert.deepEqual(Object.keys(route), ["s1", "s2"], "both members are observers");
+    assert.deepEqual(Object.keys(route.s2), ["s1", "s2"], "every observer sees every target");
+    assert.deepEqual(Object.keys(route.s1.s2).sort(), Object.keys(ALL_ZERO).sort(),
+      "each cell carries the full counter set");
+  } finally { await plugin.close(); }
+});
+
+test("the tool returns only the calling session's own row, and refuses a non-member", async () => {
+  const plugin = await bootPlugin();
+  try {
+    const room = await twoTurnRoom(plugin);
+    const matrix = await plugin.request(`/rooms/${room.id}/relationships`);
+    const tool = plugin.registered.get("chat_relationships");
+    assert.ok(tool, "the plugin registers chat_relationships");
+    const own = await tool.execute({ room: room.id }, exec("s1"));
+    // Exactly one observer's row travels: the caller's, and nothing that could
+    // be mistaken for a second observer's view.
+    assert.deepEqual(Object.keys(own).sort(), ["observer", "targets"]);
+    assert.equal(own.observer, "s1");
+    assert.deepEqual(own.targets, matrix.s1);
+    assert.equal("s2" in own, false);
+    // The other member reaches only their own row, never the first one's.
+    const theirs = await tool.execute({ room: room.id }, exec("s2"));
+    assert.equal(theirs.observer, "s2");
+    assert.deepEqual(theirs.targets, matrix.s2);
+    await assert.rejects(tool.execute({ room: room.id }, exec("outsider")), /member/);
+  } finally { await plugin.close(); }
+});
+
+test("the tool reads through the one projection the route returns", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "dcl-relationship-path-"));
+  const ctx = {
+    agents: { get: () => undefined },
+    dshBridge: { status: async () => ({ state: "idle" }), deliverExternal: async () => {} },
+    get(name) { return this[name]; }
+  };
+  const service = new DshChatLocalService(ctx, { path: join(directory, "rooms.json") });
+  await service.ready;
+  try {
+    const room = await service.createRoom({ name: "同一路径", autoDeliver: true,
+      members: [{ kind: "session", sessionId: "s1", alias: "甲" }] });
+    // One scheduled turn gives the projection a row to carry, so "the row is a
+    // selection out of the projection" is visible rather than two empty objects.
+    await service.send({ roomId: room.id, author: "human:me", authorKind: "human", text: "开始" });
+    await waitFor(async () => (await service.eventsFor(room.id))
+      .some((event) => event.type === "relationship.snapshot"), "the relationship snapshot");
+    const projections = [];
+    const reads = [];
+    const project = service.relationships.bind(service);
+    const read = service.eventLog.read.bind(service.eventLog);
+    service.relationships = async (roomId) => { projections.push(roomId); return project(roomId); };
+    service.eventLog.read = async (roomId) => { reads.push(roomId); return read(roomId); };
+    const row = await service.relationshipRow(room.id, "s1");
+    // One projection, one log read: the tool's row is a selection out of what
+    // the route returns, not a second derivation.
+    assert.deepEqual(projections, [room.id]);
+    assert.deepEqual(reads, [room.id]);
+    assert.deepEqual(row, { observer: "s1", targets: { s1: ALL_ZERO } });
+    const matrix = await service.relationships(room.id);
+    assert.deepEqual(row.targets, matrix.s1);
+  } finally {
+    await service.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a room with no snapshot projects nothing, and neither surface appends an event", async () => {
+  const plugin = await bootPlugin();
+  try {
+    const room = await plugin.request("/rooms", { name: "空关系", autoDeliver: false,
+      members: [{ kind: "session", sessionId: "s1", alias: "甲" }] });
+    const before = JSON.stringify(await eventsOf(plugin, room.id));
+    assert.deepEqual(await plugin.request(`/rooms/${room.id}/relationships`), {},
+      "no snapshot means no current relationship, not an invented table");
+    const tool = plugin.registered.get("chat_relationships");
+    assert.deepEqual(await tool.execute({ room: room.id }, exec("s1")), { observer: "s1", targets: {} });
+    assert.equal(JSON.stringify(await eventsOf(plugin, room.id)), before,
+      "a read-only surface must not append to the log it reads");
+  } finally { await plugin.close(); }
+});
+
+test("a missing or unreadable log degrades to an empty projection instead of failing the request", async () => {
+  const plugin = await bootPlugin();
+  try {
+    const room = await twoTurnRoom(plugin);
+    assert.notDeepEqual(await plugin.request(`/rooms/${room.id}/relationships`), {},
+      "the fixture must have a projection to lose");
+    const tool = plugin.registered.get("chat_relationships");
+    const logPath = join(plugin.directory, "events", `${room.id}.jsonl`);
+    // A room whose log is simply absent: no relationship state is readable.
+    await rm(logPath, { force: true });
+    assert.deepEqual(await plugin.request(`/rooms/${room.id}/relationships`), {});
+    assert.deepEqual(await tool.execute({ room: room.id }, exec("s1")), { observer: "s1", targets: {} });
+    // A log that is present but cannot be parsed: same empty answer, still no 500.
+    await writeFile(logPath, "this is not an event\n", "utf8");
+    assert.deepEqual(await plugin.request(`/rooms/${room.id}/relationships`), {});
+    assert.deepEqual(await tool.execute({ room: room.id }, exec("s1")), { observer: "s1", targets: {} });
+  } finally { await plugin.close(); }
+});
+
+test("chat_relationships stays available in a restricted group turn", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "dcl-relationship-guard-"));
+  const ctx = {
+    agents: { get: () => undefined },
+    dshBridge: { status: async () => ({ state: "idle" }), deliverExternal: async () => {} },
+    get(name) { return this[name]; }
+  };
+  const service = new DshChatLocalService(ctx, { path: join(directory, "rooms.json") });
+  await service.ready;
+  try {
+    const room = await service.createRoom({ name: "受限回合", autoDeliver: false,
+      members: [{ kind: "session", sessionId: "s1", alias: "甲" }] });
+    service.policyLocks.set("s1", { active: true, actionMode: "discuss_only", expiresAt: Date.now() + 10_000 });
+    assert.equal(service.guardToolExecution({ name: "chat_relationships", arguments: { room: room.id },
+      agent: { session: { id: "s1" } } }), undefined);
+    // The allowance is specific to this read-only tool, not a general loosening.
+    assert.match(service.guardToolExecution({ name: "bash", arguments: {}, agent: { session: { id: "s1" } } }),
+      /非只读工具/);
+  } finally {
+    await service.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
