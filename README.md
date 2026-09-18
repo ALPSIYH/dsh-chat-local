@@ -158,17 +158,13 @@ dsh plugin --profile web add link:/path/to/dsh-chat-local
 
 关系层不只是给人看，也要能被当作实验跑。三件事让它可复现：把自变量写进日志、把「重置」变成可审计的事件、以及一个只读的评测脚本。
 
-**干预（人类独有的端点）。** `POST /api/dsh-chat-local/rooms/:id/relationship-intervention`，请求体 `{action: "set"|"clear"|"seed", observerId?, targetId?, counters?, appliedBy: "human", mechanism, note}`，写入一条 `relationship.intervention` 事件。语义是**开一个新的计数窗口**：`clear` 让被点名对象（不点名即全体）的十个计数器从该事件起归零，`set`/`seed` 还给出窗口的起始计数，只有该事件**之后**的事件才计入。`set` 与 `seed` 在派生上相同，区别是写法：`seed` 表示一局的初始条件。`observerId` 会被记录，但**不收窄作用范围**——计数器是对象的记录、在每个观察者那里都相同，所以按对象开窗才是完整的。`clear` 不带 `counters`；`set`/`seed` 必须带，且只需写要改的计数，未写的按 0 起算。
+**干预。** `POST /api/dsh-chat-local/rooms/:id/relationship-intervention`，请求体 `{action: "set"|"clear"|"seed", observerId?, targetId?, counters?, appliedBy: "human", mechanism, note}`，写入一条 `relationship.intervention` 事件。语义是**开一个新的计数窗口**：`clear` 让被点名对象（不点名即全体）的十个计数器从该事件起归零，`set`/`seed` 还给出窗口的起始计数，只有该事件**之后**的事件才计入。`set` 与 `seed` 在派生上相同，区别是写法：`seed` 表示一局的初始条件。`observerId` 会被记录，但**不收窄作用范围**——计数器是对象的记录、在每个观察者那里都相同，所以按对象开窗才是完整的。`clear` 不带 `counters`；`set`/`seed` 必须带，且只需写要改的计数，未写的按 0 起算。
 
 事件记录**干预之前的 counters**（`countersBefore`，按对象），否则「重置了什么」不可复核。`clear` 是重置而不是删除：日志里全部既有事件与既有快照逐字节保留，投影只是从这条事件起读到新的计数。
 
-这个端点**只能由人类调用**，而且**不是**任何 `chat_*` 工具：
+这个端点**不注册为任何 `chat_*` 工具**，并要求调用方明确声明 `appliedBy: "human"`，同时在**房间内有成员正处于群聊回合中时一律以 403 拒绝**。拒绝「回合中的调用」正是关键：Agent 只在自己的回合里行动，所以它无法在自己回合内清掉自己的计数——那等于同时改写实验的自变量与因变量，事后无法修复。非法的输入一律带原因拒绝（未知 `action`、缺 `mechanism`、非本房间成员、越界或未知的计数器名、`clear` 带 `counters`、未知字段），不静默忽略。它挂在与其他会改动状态的端点相同的本地回环表面上：跨站浏览器请求会被拒，但本机上已经能执行命令的进程不受它约束——与策略端点同一口径，真正的成员隔离仍须由 DSH 原生沙箱与审批提供。
 
-- `appliedBy` 必须恰好是 `"human"`；其它值（包括缺省）一律以 403 拒绝并说明原因。
-- 房间内有任何成员正处于群聊回合中时，调用一律以 403 拒绝。一个 Agent 在自己的回合里清掉自己的计数，等于同时改写实验的自变量与因变量，事后无法修复；这是结构性拒绝，不是约定。
-- 非法输入一律带原因拒绝，不静默忽略：未知 `action`、缺 `mechanism`、非本房间成员、越界（负数或非整数）或未知的计数器名、`clear` 带 `counters`、未知字段。
-
-**run manifest。** `POST /api/dsh-chat-local/rooms/:id/run-manifest`，请求体 `{arm: "persistent"|"reset_per_episode", appliedBy: "human"}`，写入一条 `run.manifest` 事件：`{configHash, models, initialStateVersion, startedAtTick, arm}`。它同样是人类独有的，共用上面那一套守卫与拒绝规则。`models` 记录**运行时实际报告的** provider/model，读不到就记 `null`：这个 harness 的 `subagent` 工具没有 model 参数，插件也无法指定成员使用的模型，所以调用方提供的模型名不被接受（出现即拒绝）。
+**run manifest。** `POST /api/dsh-chat-local/rooms/:id/run-manifest`，请求体 `{arm: "persistent"|"reset_per_episode", appliedBy: "human"}`，写入一条 `run.manifest` 事件：`{configHash, models, initialStateVersion, startedAtTick, arm}`。它同样**不注册为工具**，并共用上面那一套守卫与拒绝规则（`appliedBy` 与「回合中拒绝」）。`models` 记录**运行时实际报告的** provider/model，读不到就记 `null`：这个 harness 的 `subagent` 工具没有 model 参数，插件也无法指定成员使用的模型，所以调用方提供的模型名不被接受（出现即拒绝）。
 
 `configHash` 覆盖**影响注入的全部配置**：注入上限（600 字符）、单个 `claim` 的引用上限、两条标题、计数器标签与顺序、立场标签、行模板，以及治理门开关 `room.policy.gate` 与判断部分的进程开关 `appraisalDigest`（插件配置项，默认开）。注入文本就是由这些常量拼出来的，`lib/experiment.js` 是它们的唯一来源，所以两个 `configHash` 相同的 run 注入的是同一段文本，而改了配置却哈希不变的情况不存在。哈希对键序不敏感：等价配置得到同一哈希。
 
