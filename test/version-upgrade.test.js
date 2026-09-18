@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, writeFile, rm, stat, symlink } from "node:fs/promises";
+import { access, mkdtemp, readFile, writeFile, rm, stat, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DshChatLocalService } from "../lib/room-store.js";
@@ -57,6 +57,34 @@ test("a state file from the version before the gate keeps a byte-identical backu
     const saved = JSON.parse(await readFile(path, "utf8"));
     assert.equal(saved.version, 16);
     assert.equal(saved.rooms[0].policy.gate, true);
+  } finally {
+    await next.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a state file that carries no version gets a named backup, not .vundefined.bak", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "dcl-upgrade-noversion-"));
+  const path = join(directory, "rooms.json");
+  const service = new DshChatLocalService({}, { path });
+  const room = await service.createRoom({ name: "无版本", autoDeliver: false });
+  await service.close();
+  // The load tolerates a missing `version`; it must not turn that tolerance into
+  // a backup whose name is the string "undefined".
+  const legacy = JSON.parse(await readFile(path, "utf8"));
+  delete legacy.version;
+  const bytes = JSON.stringify(legacy);
+  await writeFile(path, bytes);
+  const next = new DshChatLocalService({}, { path });
+  try {
+    await next.ready;
+    assert.equal(await readFile(`${path}.vunversioned.bak`, "utf8"), bytes,
+      "the pre-migration bytes are kept under a name that says what the file is");
+    await assert.rejects(access(`${path}.vundefined.bak`), { code: "ENOENT" },
+      "no backup may be named after a JavaScript placeholder");
+    assert.equal(next.stateVersion(), 16);
+    assert.equal((await next.resolveRoom(room.id)).name, "无版本");
+    assert.equal(JSON.parse(await readFile(path, "utf8")).version, 16);
   } finally {
     await next.close();
     await rm(directory, { recursive: true, force: true });
