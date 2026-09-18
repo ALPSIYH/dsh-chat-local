@@ -94,6 +94,13 @@ function appraisalEvent({ id, tick, at = 0, observerId, aboutAgentId, stance = "
       validFrom: validFrom ?? tick, validTo, action } });
 }
 
+/** A `relationship.intervention` envelope as the store writes one. */
+function interventionEvent({ id, tick, at = 0, action = "clear", observerId = null, targetId = null,
+  counters = null, appliedBy = "human", mechanism = "test", note = null }) {
+  return event({ id, type: "relationship.intervention", actor: "human:me", tick, at,
+    payload: { action, observerId, targetId, counters, appliedBy, mechanism, note } });
+}
+
 /** An ordered `turn.scheduled` envelope, used as pre-R41 membership evidence. */
 function turn({ id, tick, at, roster }) {
   return event({ id, type: "turn.scheduled", tick, at,
@@ -765,6 +772,166 @@ test("an action_gate event is not evidence for any counter", () => {
   // The fixture must carry real counters: "nothing changed" proves nothing on a
   // log of zeros.
   assert.ok(Object.values(countersFor(after, "r1", "r1")).some((value) => value > 0));
+});
+
+/**
+ * Interventions: the experiment's lever, and the one event type this module
+ * handles by opening a *new counting window* rather than by adding a count.
+ *
+ * The semantics are the writer's contract made mechanical here: `clear` resets
+ * the named targets (all targets when none is named), `set`/`seed` also state
+ * the counters the window starts at, and only events strictly after the window's
+ * intervention count. `observerId` is recorded but is not a window key, because
+ * a counter describes its target and is identical under every observer — the
+ * test states that property rather than leaving it to the module comment.
+ */
+
+test("a clear intervention restarts the named target's counters at zero", () => {
+  const base = log();
+  const before = countersFor(deriveRelationships({ events: base, roomId: ROOM }), "o1", "o1");
+  assert.equal(before.deliveriesOffered, 1, "the fixture must carry a counter to reset");
+  assert.equal(before.messagesAuthored, 2);
+  // Tick 9 sits after every o1 event (the last is tick 8).
+  const cleared = [...base, interventionEvent({ id: "i1", tick: 9, at: 25, action: "clear", targetId: "o1" })];
+  const after = deriveRelationships({ events: cleared, roomId: ROOM });
+  // A `clear` resets rather than deletes: events after it count again from zero.
+  const later = [...cleared, message({ id: "t25", author: "o1", tick: 10, at: 26 })];
+  assert.deepEqual(countersFor(after, "o1", "o1"), ALL_ZERO, "no counter survives its own reset");
+  assert.equal(countersFor(deriveRelationships({ events: later, roomId: ROOM }), "o1", "o1").messagesAuthored, 1,
+    "the window counts again from the intervention");
+});
+
+test("a clear intervenes on every target when it names none, and only the named one otherwise", () => {
+  const base = log();
+  const all = deriveRelationships({ events: [...base, interventionEvent({ id: "i1", tick: 9, at: 25 })], roomId: ROOM });
+  expectTarget(all, "o1", {});
+  expectTarget(all, "o2", {});
+  expectTarget(all, "r1", {});
+  const one = deriveRelationships({ events: [...base, interventionEvent({ id: "i1", tick: 9, at: 25, targetId: "o2" })], roomId: ROOM });
+  expectTarget(one, "o2", {});
+  expectTarget(one, "o1", { messagesAuthored: 2, deliveriesOffered: 1, deliverySuccesses: 1,
+    blockedReports: 1, charterProposalsSuperseded: 1 });
+});
+
+test("a set or seed states the counters its window starts at, and events accumulate on them", () => {
+  const base = log();
+  const seeded = deriveRelationships({ events: [...base,
+    interventionEvent({ id: "i1", tick: 9, at: 25, action: "seed", targetId: "o2", counters: { deliveryFailures: 2 } })], roomId: ROOM });
+  assert.deepEqual(countersFor(seeded, "r1", "o2"), { ...ALL_ZERO, deliveryFailures: 2 },
+    "the stated counters are the window's start, not an addition to the old ones");
+  const grown = deriveRelationships({ events: [...base,
+    interventionEvent({ id: "i1", tick: 9, at: 25, action: "set", targetId: "o2", counters: { deliveryFailures: 2 } }),
+    delivery({ id: "t25", member: "o2", status: "failed", tick: 10, at: 26 })], roomId: ROOM });
+  assert.deepEqual(countersFor(grown, "o1", "o2"), { ...ALL_ZERO, deliveryFailures: 3 },
+    "a later failure accumulates on the stated counters");
+});
+
+test("a later intervention governs the events between two of them", () => {
+  // A `set` at tick 9 and a `clear` at tick 11: the failure at tick 10 is inside
+  // the later window, which starts at zero, so it must not survive.
+  const events = [
+    membersEvent(),
+    delivery({ id: "t25", member: "o1", status: "failed", tick: 10, at: 26 }),
+    interventionEvent({ id: "i1", tick: 9, at: 27, action: "set", targetId: "o1", counters: { deliveryFailures: 5 } }),
+    interventionEvent({ id: "i2", tick: 11, at: 28, action: "clear", targetId: "o1" })
+  ];
+  const result = deriveRelationships({ events, roomId: ROOM });
+  assert.deepEqual(countersFor(result, "o1", "o1"), ALL_ZERO,
+    "the last intervention governs everything before it, whatever an earlier one stated");
+});
+
+test("an intervention is a window for its target under every observer, not for the named observer", () => {
+  const events = [
+    membersEvent(),
+    delivery({ id: "t25", member: "o1", status: "failed", tick: 2, at: 2 }),
+    interventionEvent({ id: "i1", tick: 3, at: 3, action: "clear", observerId: "r1", targetId: "o1" })
+  ];
+  const result = deriveRelationships({ events, roomId: ROOM });
+  // C counters are the target's, so the window cannot be one observer's private
+  // view: every observer reads the reset row.
+  expectTarget(result, "o1", {});
+});
+
+test("the observer named by an intervention without a target does not narrow it", () => {
+  const events = [
+    membersEvent(),
+    delivery({ id: "t25", member: "o1", status: "failed", tick: 2, at: 2 }),
+    delivery({ id: "t26", member: "o2", status: "failed", tick: 2, at: 3 }),
+    interventionEvent({ id: "i1", tick: 3, at: 4, action: "clear", observerId: "r1" })
+  ];
+  const result = deriveRelationships({ events, roomId: ROOM });
+  expectTarget(result, "o1", {});
+  expectTarget(result, "o2", {});
+});
+
+test("an intervention past the horizon opens nothing, and one before it does", () => {
+  const base = [membersEvent(),
+    delivery({ id: "t25", member: "o1", status: "failed", tick: 2, at: 2 })];
+  const future = deriveRelationships({ events: [...base, interventionEvent({ id: "i1", tick: 9, at: 9 })], roomId: ROOM, asOfTick: 2 });
+  assert.equal(countersFor(future, "o1", "o1").deliveryFailures, 1, "an event past asOfTick is not evidence");
+  const inside = deriveRelationships({ events: [...base, interventionEvent({ id: "i1", tick: 2, at: 9 })], roomId: ROOM, asOfTick: 2 });
+  assert.equal(countersFor(inside, "o1", "o1").deliveryFailures, 0, "asOfTick is inclusive, so a tick-2 intervention applies");
+});
+
+test("an intervention also closes the auxiliary facts its window starts after", () => {
+  // e2's blocked report (tick 5) is retired by its disposition (tick 6), and
+  // e3's dispute (tick 7) stays open. A reset after every one of them retires
+  // both the reports and the still-open disagreement.
+  const base = log();
+  const before = countersFor(deriveRelationships({ events: base, roomId: ROOM }), "o2", "o2");
+  assert.equal(before.blockedReports, 1);
+  assert.equal(before.blockedConfirmed, 1);
+  const cleared = deriveRelationships({ events: [...base, interventionEvent({ id: "i1", tick: 9, at: 25, targetId: "o2" })], roomId: ROOM });
+  expectTarget(cleared, "o2", {});
+  // The still-open dispute belongs to r1 (e3), so a clear of r1 retires it too.
+  const disputes = deriveRelationships({ events: [...base, interventionEvent({ id: "i1", tick: 9, at: 25, targetId: "r1" })], roomId: ROOM });
+  assert.equal(countersFor(disputes, "o2", "r1").unresolvedDisagreements, 0,
+    "a disagreement established before the window is not resurrected by a later window");
+});
+
+test("an intervention this module cannot read is ignored rather than guessed at", () => {
+  const base = log();
+  const before = deriveRelationships({ events: base, roomId: ROOM });
+  for (const bad of [
+    interventionEvent({ id: "b1", tick: 9, at: 25, action: "wipe" }),
+    interventionEvent({ id: "b2", tick: 9, at: 25, action: "set", targetId: "o1", counters: { notACounter: 1 } }),
+    interventionEvent({ id: "b3", tick: 9, at: 25, action: "set", targetId: "o1", counters: { messagesAuthored: -1 } }),
+    interventionEvent({ id: "b4", tick: 9, at: 25, action: "set", targetId: "o1", counters: { messagesAuthored: 1.5 } }),
+    interventionEvent({ id: "b5", tick: 9, at: 25, action: "set", targetId: "o1", counters: "1" })
+  ]) {
+    const after = deriveRelationships({ events: [...base, bad], roomId: ROOM });
+    assert.deepEqual(after.pairs.map((item) => item.counters), before.pairs.map((item) => item.counters),
+      `an unreadable intervention must change no counter: ${bad.id}`);
+  }
+});
+
+test("an intervention is part of the basis of the pair it restarted, and raises its tick", () => {
+  const base = [membersEvent(),
+    delivery({ id: "t25", member: "o1", status: "failed", tick: 2, at: 2 }),
+    interventionEvent({ id: "i1", tick: 5, at: 5, action: "clear", targetId: "o1" })];
+  const result = deriveRelationships({ events: base, roomId: ROOM });
+  const cell = result.pairs.find((item) => item.observer === "o2" && item.target === "o1");
+  assert.ok(cell.derivedFrom.includes("i1"), `the reset must explain the counters it produced: ${cell.derivedFrom}`);
+  assert.equal(cell.tick, 5, "the intervention is the freshest evidence behind the row it restarted");
+  assert.ok(!cell.derivedFrom.includes("t25"), "the reset event it closed over is not evidence for the new window");
+  assert.ok(result.derivedFrom.includes("i1"));
+});
+
+test("two derivations of a log with interventions are byte-identical, in any input order", () => {
+  const events = [...log(),
+    interventionEvent({ id: "i1", tick: 9, at: 25, action: "clear", targetId: "o1" }),
+    interventionEvent({ id: "i2", tick: 10, at: 26, action: "seed", targetId: "r1", counters: { reviewsApproved: 4 } }),
+    message({ id: "t25", author: "o1", tick: 11, at: 27 })];
+  const first = deriveRelationships({ events, roomId: ROOM });
+  const second = deriveRelationships({ events: shuffle(events), roomId: ROOM });
+  assert.equal(JSON.stringify(first), JSON.stringify(second));
+});
+
+test("an intervention in another room never resets this room's counters", () => {
+  const base = log();
+  const foreign = { ...interventionEvent({ id: "i1", tick: 9, at: 25 }), provenance: { roomId: OTHER_ROOM } };
+  const result = deriveRelationships({ events: [...base, foreign], roomId: ROOM });
+  assert.ok(Object.values(countersFor(result, "o1", "o1")).some((value) => value > 0));
 });
 
 /**

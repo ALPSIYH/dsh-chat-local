@@ -106,7 +106,15 @@ const PRE_GATE_OUTCOMES = [
   ["restricted loopback fetch", "群聊回合处于受限模式：Host 已拒绝访问本机或内网地址。受限回合不能借此读取本机服务或其他房间的状态；需要外部资料请直接用 web_search，需要本机操作请用户打开负责人原生 DSH 会话。"],
   ["restricted chat_relationships", "allow"],
 ];
-const PRE_GATE_EVENT_TYPES = ["member.added", "message.created", "message.created", "turn.scheduled", "relationship.snapshot", "turn.prompt", "delivery.settled", "message.created", "turn.scheduled", "relationship.snapshot", "turn.prompt", "delivery.sent", "delivery.settled"];
+/**
+ * The exact sequence a gate-off turn records. This is the gate's own contract
+ * ("with the gate off nothing about the turn changes"), so the one entry the
+ * gate never writes — `injection.cost`, the cost record every delivery now
+ * appends beside `turn.prompt`, independent of the gate — is part of the
+ * baseline rather than filtered out: the assertion is that the sequence is
+ * exactly this, and that no `action_gate` appears in it.
+ */
+const PRE_GATE_EVENT_TYPES = ["member.added", "message.created", "message.created", "turn.scheduled", "relationship.snapshot", "turn.prompt", "injection.cost", "delivery.settled", "message.created", "turn.scheduled", "relationship.snapshot", "turn.prompt", "injection.cost", "delivery.sent", "delivery.settled"];
 const PRE_GATE_PROMPTS = [
   { chars: 2734, sha256: "d65a9d95a7eba27eca99c99b04150b98d7ece00ed8002bed81293ff21804ee6b" },
   { chars: 2790, sha256: "e20db3c20c9da0065fe984ea264a43de409f438f452f5a5ad42fa877256e4f1b" },

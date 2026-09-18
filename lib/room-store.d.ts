@@ -34,6 +34,20 @@ export declare class DshChatLocalService {
   relationshipRow(roomId: string, sessionId: string): Promise<any>;
   appraise(roomId: string, sessionId: string, input: any): Promise<any>;
   /**
+   * Human-only: record a `relationship.intervention` that opens a new counting
+   * window for the targets it names. Refused unless `appliedBy` is exactly
+   * "human", and refused while a member of the room holds an active group-chat
+   * turn. The counters as they stood before the intervention are recorded in the
+   * event.
+   */
+  relationshipIntervention(roomId: string, input: any): Promise<any>;
+  /**
+   * Human-only: record the `run.manifest` that fixes one run's arm, models,
+   * state version, start tick and injection config hash. Refused under the same
+   * rules as `relationshipIntervention`.
+   */
+  startRun(roomId: string, input: any): Promise<any>;
+  /**
    * Wait until the audit appends this service already owes have reached the log,
    * then report the log's health. It joins only work already issued: it never
    * waits for a turn to end, appends nothing of its own, and is a read.
