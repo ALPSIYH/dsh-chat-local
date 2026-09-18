@@ -8,12 +8,13 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { EventLog } from "../lib/event-log.js";
 import {
+  DELIVERY_REACHED_STATUSES,
   DEPENDENT_VARIABLE_VERSION, DIGEST_RENDERERS, INJECTION_CONFIG_VERSION, MIN_RUNS,
   RELATIONSHIP_DIGEST_APPRAISAL_HEADING,
   RELATIONSHIP_DIGEST_CLAIM_MAX_CHARS, RELATIONSHIP_DIGEST_COUNTERS, RELATIONSHIP_DIGEST_COUNTER_TEMPLATE,
   RELATIONSHIP_DIGEST_HEADING, RELATIONSHIP_DIGEST_MAX_CHARS, RELATIONSHIP_DIGEST_STANCES,
   TOKEN_ESTIMATE_METHOD, configHashOf, dependentVariables, digestAlgorithmFingerprint, dispersion,
-  estimateTokens, injectionConfigFor, runArm, runManifests, runSegments } from "../lib/experiment.js";
+  estimateTokens, hasInteraction, injectionConfigFor, runArm, runManifests, runSegments } from "../lib/experiment.js";
 import { RELATIONSHIP_VERSION } from "../lib/relationship.js";
 import { EVAL_FORMAT, INSUFFICIENT_EXIT, evaluate, renderText } from "../scripts/relationship-eval.mjs";
 
@@ -231,7 +232,11 @@ test("every dependent variable is read from its own event evidence", () => {
     ledger(9, { entryId: "d2", kind: "dispute", action: "record", status: "resolved", ownerSessionId: "s2" }),
     { id: "g1", type: "action_gate", tick: 10, at: 10, payload: { judgement: "require_confirmation" }, provenance: { roomId } },
     { id: "g2", type: "action_gate", tick: 10, at: 11, payload: { judgement: "deny" }, provenance: { roomId } },
-    { id: "c1", type: "injection.cost", tick: 11, at: 11, payload: { digestChars: 100 }, provenance: { roomId } },
+    { id: "c1", type: "injection.cost", tick: 11, at: 11, payload: { deliveryId: "d1", digestChars: 100 }, provenance: { roomId } },
+    // The member's own session received that delivery: this is the evidence that
+    // makes the injection an interaction rather than a constructed record.
+    { id: "c2", type: "delivery.settled", tick: 11, at: 12,
+      payload: { deliveryId: "d1", member: "s1", status: "delivered", previous: "sent" }, provenance: { roomId } },
     // A transition that repeats t1's existing owner is not a second selection.
     ledger(12, { entryId: "t1", kind: "task", action: "comment", status: "open", ownerSessionId: "s1", reviewerSessionId: "r1" })
   ];
@@ -306,7 +311,12 @@ async function stateWithRuns(count, options = {}) {
         { entryId: `d${index}`, kind: "dispute", action: "record", status: "open", ownerSessionId: "s1" },
         { kind: "session", id: "s1" }),
       event("action_gate", 5, { judgement: "deny" }, { kind: "session", id: "s1" }),
-      event("injection.cost", 6, { digestChars: 100 + index }, { kind: "system", id: "system" }),
+      event("injection.cost", 6, { deliveryId: `d${index}`, digestChars: 100 + index }, { kind: "system", id: "system" }),
+      // The delivery reached the member, so the run holds an interaction as the
+      // gate defines one: an injection the member's session was recorded as
+      // receiving.
+      event("delivery.settled", 6, { deliveryId: `d${index}`, member: "s1", status: "delivered" },
+        { kind: "session", id: "s1" }),
       event("message.created", 4 + tickOffset, { messageId: `m${index}`, authorKind: "session" },
         { kind: "session", id: "s1" })
     ]);
@@ -459,12 +469,17 @@ test("the gate counts interactions, and the statistics read only those runs", as
   const statePath = join(directory, "rooms.json");
   try {
     // One room, ten manifest-delimited segments; only three of them hold an
-    // injected member turn. Ten segments are not ten observations, and the three
-    // that are must not have their mean diluted by the seven that are not.
+    // injected member turn the member received. Ten segments are not ten
+    // observations, and the three that are must not have their mean diluted by
+    // the seven that are not.
     const events = [];
     for (let index = 1; index <= 10; index += 1) {
       events.push(manifest({ tick: index * 2 - 1 }));
-      if (index <= 3) events.push(event("injection.cost", index * 2, { digestChars: index * 100 }));
+      if (index <= 3) {
+        events.push(event("injection.cost", index * 2, { deliveryId: `d${index}`, digestChars: index * 100 }));
+        events.push(event("delivery.settled", index * 2,
+          { deliveryId: `d${index}`, member: "s1", status: "delivered" }));
+      }
     }
     await writeLog(statePath, "mixed", events);
     const refused = await runScript(["--state", statePath, "--json"]);
@@ -485,6 +500,88 @@ test("the gate counts interactions, and the statistics read only those runs", as
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
+test("an interaction is an injection the member received, not one that was constructed", () => {
+  const roomId = "room-1";
+  const cost = (tick, deliveryId, chars) => ({ id: `c${tick}-${deliveryId}`, type: "injection.cost", tick, at: tick,
+    payload: { deliveryId, digestChars: chars }, provenance: { roomId } });
+  const settle = (tick, deliveryId, status) => ({ id: `s${tick}-${deliveryId}`, type: "delivery.settled", tick, at: tick,
+    payload: { deliveryId, status }, provenance: { roomId } });
+  // The writer appends the cost record before it calls the transport, so a
+  // refused delivery leaves one behind. On its own it is not an interaction.
+  const refused = dependentVariables({ events: [cost(2, "d1", 66), settle(3, "d1", "failed")], roomId });
+  assert.equal(refused.injectedTurns, 0);
+  assert.equal(refused.unreachedInjections, 1);
+  assert.equal(refused.injectedDigestCharsTotal, 0);
+  assert.equal(refused.injectedDigestCharsMean, null);
+  assert.equal(hasInteraction(refused), false, "a constructed injection is not a member turn");
+  // The same record, with the member's own session recorded as receiving it.
+  const received = dependentVariables({ events: [cost(2, "d1", 66), settle(3, "d1", "delivered")], roomId });
+  assert.equal(received.injectedTurns, 1);
+  assert.equal(received.unreachedInjections, 0);
+  assert.equal(received.injectedDigestCharsTotal, 66);
+  assert.equal(hasInteraction(received), true);
+  // A zero-character injection still counts once the member was reached: the
+  // criterion is "a member turn happened", not "a digest was injected".
+  const empty = dependentVariables({ events: [cost(2, "d1", 0), settle(3, "d1", "delivered")], roomId });
+  assert.equal(empty.injectedTurns, 1);
+  assert.equal(empty.injectedDigestCharsMean, 0);
+  assert.equal(hasInteraction(empty), true);
+  // Two injections, one of which no member ever saw: the mean is read only from
+  // the received one, so text nobody read cannot move it.
+  const mixed = dependentVariables({ events: [cost(1, "d1", 100), settle(2, "d1", "delivered"),
+    cost(3, "d2", 900), settle(4, "d2", "failed")], roomId });
+  assert.equal(mixed.injectedTurns, 1);
+  assert.equal(mixed.unreachedInjections, 1);
+  assert.equal(mixed.injectedDigestCharsMean, 100);
+  // The join is by `deliveryId`, so a received delivery cannot vouch for another
+  // delivery's cost record — which a run-level "some delivery succeeded" test
+  // would let it do.
+  const crossed = dependentVariables({ events: [cost(1, "d1", 100), cost(2, "d2", 200),
+    settle(3, "d2", "delivered")], roomId });
+  assert.equal(crossed.injectedTurns, 1);
+  assert.equal(crossed.injectedDigestCharsTotal, 200);
+  // `sent` is not reach: it is written when the transport call returns, not when
+  // the member's session has seen the prompt. `failed`/`superseded` are not
+  // either.
+  assert.deepEqual([...DELIVERY_REACHED_STATUSES], ["delivered", "working", "replied", "passed"]);
+});
+
+test("ten refused deliveries cannot satisfy the gate, and the report names them", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "dcl-eval-refused-"));
+  const statePath = join(directory, "rooms.json");
+  try {
+    // Ten runs, each one manifest followed by a constructed injection whose
+    // delivery the member never received — the exact shape a bridge that refuses
+    // every call leaves behind. Before the join, this printed `conclusive`.
+    const events = [];
+    for (let index = 1; index <= 10; index += 1) {
+      events.push(manifest({ tick: index * 2 - 1 }));
+      events.push(event("injection.cost", index * 2, { deliveryId: `d${index}`, digestChars: 66 }));
+      events.push(event("delivery.settled", index * 2, { deliveryId: `d${index}`, member: "s1", status: "failed" }));
+    }
+    await writeLog(statePath, "refused", events);
+    const refused = await runScript(["--state", statePath, "--json"]);
+    assert.equal(refused.code, INSUFFICIENT_EXIT, "ten refused deliveries must not conclude");
+    const report = JSON.parse(refused.stdout);
+    assert.equal(report.status, "insufficient-sample");
+    assert.equal(report.assertsConclusions, false);
+    assert.equal(report.runs.length, 10);
+    assert.ok(report.runs.every((run) => run.analysable === false));
+    assert.ok(report.runs.every((run) => run.dependentVariables.unreachedInjections === 1));
+    const group = report.groups[0];
+    assert.equal(group.runCount, 10);
+    assert.equal(group.analysableRunCount, 0);
+    assert.equal(group.statistics, null);
+    assert.equal(group.observation, null, "no member was reached, so there is nothing to observe");
+    // The constructed injections are named rather than silently discarded.
+    const text = await runScript(["--state", statePath]);
+    assert.equal(text.code, INSUFFICIENT_EXIT);
+    assert.ok(!/\bresult\b/u.test(text.stdout), "no line may be printed as a result");
+    assert.match(text.stdout, /injection\(s\) never reached a member/u);
+    assert.match(text.stdout, /no interaction to analyse/u);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
 test("the script is read-only: the state directory is byte-identical afterwards", async () => {
   const { directory, statePath } = await stateWithRuns(10);
   try {
@@ -502,11 +599,14 @@ test("runs are pooled only when their configuration matches, and a broken chain 
   try {
     // Two comparable runs and one that injected a different config.
     await writeLog(statePath, "same-1", [manifest({ tick: 1 }),
-      event("injection.cost", 2, { digestChars: 10 })]);
+      event("injection.cost", 2, { deliveryId: "d1", digestChars: 10 }),
+      event("delivery.settled", 2, { deliveryId: "d1", member: "s1", status: "delivered" })]);
     await writeLog(statePath, "same-2", [manifest({ tick: 1 }),
-      event("injection.cost", 2, { digestChars: 12 })]);
+      event("injection.cost", 2, { deliveryId: "d2", digestChars: 12 }),
+      event("delivery.settled", 2, { deliveryId: "d2", member: "s1", status: "delivered" })]);
     await writeLog(statePath, "other", [manifest({ tick: 1, configHash: "b".repeat(64) }),
-      event("injection.cost", 2, { digestChars: 900 })]);
+      event("injection.cost", 2, { deliveryId: "d3", digestChars: 900 }),
+      event("delivery.settled", 2, { deliveryId: "d3", member: "s1", status: "delivered" })]);
     // A log whose chain does not verify is not analysable: its record's order or
     // content cannot be trusted, so it must be refused rather than pooled.
     await writeLog(statePath, "broken", [manifest({ tick: 1 })]);

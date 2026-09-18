@@ -17,9 +17,14 @@
  *   non-zero. `--observation` switches to the explicit observation-only mode,
  *   which prints descriptive statistics clearly labelled as observations and
  *   still asserts nothing. The threshold cannot be lowered: `--min-runs` may
- *   only raise it. **The gate counts runs that hold an interaction**, not
- *   manifest-delimited segments: ten `startRun` calls in an idle room are ten
- *   restarts, not ten observations, and they conclude nothing.
+ *   only raise it. **The gate counts runs that hold a member turn which reached
+ *   the member**, not manifest-delimited segments and not constructed
+ *   injections: ten `startRun` calls in an idle room are ten restarts, and ten
+ *   deliveries the transport refused are ten failures, and neither concludes
+ *   anything. The evidence required is a `delivery.settled` reach status for the
+ *   same `deliveryId` as the `injection.cost` record; the cost record alone is
+ *   appended before the transport call and so exists even for a delivery that
+ *   never reached anyone.
  * - **Dispersion, never only a mean.** Every concluded group reports the
  *   sample variance, the standard deviation, the minimum and the maximum beside
  *   the mean, together with how many runs contributed a value.
@@ -204,11 +209,12 @@ function groupsOf(runs, minRuns, observation) {
   }
   const groups = [];
   for (const [, bucket] of buckets) {
-    // The gate counts runs that hold an interaction, never manifest-delimited
-    // segments: a room restarted ten times in silence holds ten segments and no
-    // observations, and a group of restarts must not be able to stand in for a
-    // study. The statistics are read from the runs that carry the interaction,
-    // so a stray restart that added no data cannot move a mean either.
+    // The gate counts runs that hold an interaction the member received, never
+    // manifest-delimited segments and never a bare `injection.cost`: a room
+    // restarted ten times in silence holds ten segments, and ten deliveries the
+    // transport refused hold ten cost records, and neither is a study. The
+    // statistics are read from the runs that carry the interaction, so a stray
+    // restart that added no data cannot move a mean either.
     const analysable = bucket.filter((run) => run.analysable);
     const sufficient = analysable.length >= minRuns;
     const first = bucket[0];
@@ -242,7 +248,7 @@ export async function evaluate({ statePath, roomId, minRuns = MIN_RUNS, observat
   const status = concluded.length > 0 ? "conclusive" : (observation ? "observation" : "insufficient-sample");
   const notes = [
     "Runs are pooled only when arm, injection config hash, state version and models all match.",
-    `Only runs holding an interaction count toward the ${minRuns}-run gate: a manifest-delimited segment in which no member turn was ever injected is a restart, and states nothing.`,
+    `Only runs holding an interaction count toward the ${minRuns}-run gate: an interaction is an injection whose delivery reached the member (a \`delivery.settled\` reach status for the same \`deliveryId\`). A manifest-delimited segment in which no member turn was ever reached is a restart, and a run whose every delivery failed holds constructed injections and no member turn at all; neither states anything.`,
     "Every duration is measured in ticks, never in the event stamp `at`.",
     "A group reports sample variance (n-1) and is `null` for a single run."
   ];
@@ -269,7 +275,12 @@ export function renderText(report) {
     lines.push("run  room                      arm                 reviewReject  refused  disputes  disputeTicks  injectedChars/turn");
     report.runs.forEach((run, index) => {
       const dv = run.dependentVariables;
-      lines.push(`${String(index + 1).padEnd(4)} ${run.roomId.padEnd(24)} ${String(run.arm).padEnd(19)} ${number(dv.reviewRejectionRate).padStart(12)}  ${String(dv.refusedActions).padStart(7)}  ${String(dv.unresolvedDisputes).padStart(8)}  ${number(dv.unresolvedDisputeMeanTicks).padStart(12)}  ${number(dv.injectedDigestCharsMean, 1).padStart(17)}${run.analysable ? "" : "  (no interaction: states nothing)"}`);
+      // A run whose injections were all constructed but never received is the
+      // failure mode the gate exists for, so the count is named on the line
+      // rather than left for a reader to infer from `injectedChars/turn` being 0.
+      const unreached = dv.unreachedInjections > 0
+        ? `  (${dv.unreachedInjections} injection(s) never reached a member)` : "";
+      lines.push(`${String(index + 1).padEnd(4)} ${run.roomId.padEnd(24)} ${String(run.arm).padEnd(19)} ${number(dv.reviewRejectionRate).padStart(12)}  ${String(dv.refusedActions).padStart(7)}  ${String(dv.unresolvedDisputes).padStart(8)}  ${number(dv.unresolvedDisputeMeanTicks).padStart(12)}  ${number(dv.injectedDigestCharsMean, 1).padStart(17)}${unreached}${run.analysable ? "" : "  (no interaction: states nothing)"}`);
     });
   }
   for (const group of report.groups) {

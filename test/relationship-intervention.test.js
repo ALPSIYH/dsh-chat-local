@@ -10,6 +10,7 @@ import { apply } from "../lib/index.js";
 import { deriveRelationships, effectiveAppraisals } from "../lib/relationship.js";
 import { configHashOf, injectionConfigFor, RUN_MANIFEST_EVENT_TYPE,
   RELATIONSHIP_DIGEST_HEADING, RELATIONSHIP_DIGEST_APPRAISAL_HEADING } from "../lib/experiment.js";
+import { evaluate } from "../scripts/relationship-eval.mjs";
 
 /**
  * The experiment's own surfaces: the human-only intervention API, the run
@@ -433,6 +434,60 @@ test("one episode is one reset, even when a failed delivery is retried", async (
 });
 
 // --- Task 5.5: injection cost ------------------------------------------------
+
+/**
+ * The gate's unit is a member turn that reached the member, and this is the
+ * reproduction that proves it: one healthy episode, then ten restarts whose only
+ * delivery the transport refuses. Every refused attempt still writes its
+ * `turn.prompt` and `injection.cost` — they are appended before the transport is
+ * called — so a gate keyed on the cost record alone counts eleven runs and
+ * concludes, which is exactly the "green but false" outcome the ten-run gate
+ * exists to prevent. The join to the delivery that reached the member is what
+ * makes the count mean "a member turn happened".
+ */
+test("eleven runs in which one member turn happened are not a sample", async () => {
+  let refusing = false;
+  const h = await harness({}, { onDeliver: async () => {
+    if (refusing) throw new Error("transport refused every delivery");
+  } });
+  try {
+    await h.service.startRun(h.room.id, { arm: "persistent", appliedBy: "human" });
+    await runEpisode(h, "第一轮", "回复一");
+    // Ten restarts, each one human message, each delivery refused outright.
+    refusing = true;
+    for (let index = 1; index <= 10; index += 1) {
+      await h.service.startRun(h.room.id, { arm: "persistent", appliedBy: "human" });
+      await h.service.send({ roomId: h.room.id, author: "human:me", authorKind: "human", text: `第 ${index} 次重启` });
+      await waitFor(async () => !["queued", "running"].includes((await h.service.resolveRoom(h.room.id)).orchestration?.state),
+        "the refused turn to finish");
+    }
+    await h.service.settledAudit();
+    // The writer really did construct an injection for every refused delivery:
+    // the defect is not that nothing was recorded.
+    const costs = await eventsOfType(h, "injection.cost");
+    assert.ok(costs.length >= 11, "the writer constructs an injection for every attempted delivery");
+    const settled = await eventsOfType(h, "delivery.settled");
+    assert.ok(settled.filter((event) => event.payload.status === "failed").length >= 10,
+      "every post-episode delivery failed");
+    assert.equal(settled.filter((event) => event.payload.status === "delivered").length, 2,
+      "only the healthy episode's two deliveries ever reached a member");
+    const manifests = await eventsOfType(h, RUN_MANIFEST_EVENT_TYPE);
+    assert.equal(manifests.length, 11);
+    const report = await evaluate({ statePath: join(h.directory, "rooms.json") });
+    assert.equal(report.runs.length, 11, "every manifest-bearing segment is still reported");
+    assert.equal(report.assertsConclusions, false, "one real member turn is not eleven observations");
+    assert.equal(report.status, "insufficient-sample");
+    assert.deepEqual(report.runs.map((run) => run.analysable),
+      [true, ...Array.from({ length: 10 }, () => false)]);
+    assert.ok(report.runs.slice(1).every((run) => run.dependentVariables.unreachedInjections >= 1),
+      "each refused run holds constructed injections no member ever received");
+    const group = report.groups[0];
+    assert.equal(group.runCount, 11);
+    assert.equal(group.analysableRunCount, 1, "only the run whose delivery reached the members counts");
+    assert.equal(group.sufficient, false);
+    assert.equal(group.statistics, null);
+  } finally { await h.close(); }
+});
 
 test("the injection cost records the characters actually injected", async () => {
   const h = await harness();
