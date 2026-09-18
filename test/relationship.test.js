@@ -6,7 +6,8 @@ import { join } from "node:path";
 import { Readable } from "node:stream";
 import { DshChatLocalService } from "../lib/room-store.js";
 import { apply } from "../lib/index.js";
-import { RELATIONSHIP_VERSION, deriveRelationships, latestRelationships, effectiveAppraisals } from "../lib/relationship.js";
+import { RELATIONSHIP_VERSION, RELATIONSHIP_IGNORED_EVENT_TYPES, deriveRelationships, latestRelationships, effectiveAppraisals } from "../lib/relationship.js";
+import { RUN_MANIFEST_EVENT_TYPE, INJECTION_COST_EVENT_TYPE } from "../lib/experiment.js";
 
 /**
  * These tests build event envelopes by hand instead of driving a room, because
@@ -772,6 +773,31 @@ test("an action_gate event is not evidence for any counter", () => {
   // The fixture must carry real counters: "nothing changed" proves nothing on a
   // log of zeros.
   assert.ok(Object.values(countersFor(after, "r1", "r1")).some((value) => value > 0));
+});
+
+test("run.manifest and injection.cost are ignored by name, and move no counter", () => {
+  // The experiment layer writes two event types into the same log the counters
+  // are derived from. Both must stay external to the derivation, and the
+  // exclusion must be a named decision rather than a fall-through: a type the
+  // counting pass silently passes is indistinguishable from one nobody handled
+  // yet, and the next reader cannot tell which it is.
+  const base = log();
+  const before = deriveRelationships({ events: base, roomId: ROOM });
+  const manifest = event({ id: "rm1", type: "run.manifest", actor: "human:me", tick: 8, at: 25,
+    payload: { configHash: "a".repeat(64), models: { r1: { provider: "p", model: "m" } },
+      initialStateVersion: 16, startedAtTick: 0, arm: "persistent" } });
+  const cost = event({ id: "ic1", type: "injection.cost", actor: "session:r1", tick: 8, at: 26,
+    payload: { deliveryId: "d1", memberSessionId: "r1", digestChars: 120, digestHash: "f".repeat(64),
+      promptChars: 500, estimatedTokens: 40, tokenEstimateMethod: "test", tokenEstimateExact: false,
+      tokenEstimateCjkChars: 10, tokenEstimateOtherChars: 20 } });
+  const after = deriveRelationships({ events: [...base, manifest, cost], roomId: ROOM });
+  assert.deepEqual(after, before, "neither type may move a counter or enter the basis");
+  // The fixture must carry real counters: "nothing changed" proves nothing on a
+  // log of zeros.
+  assert.ok(Object.values(countersFor(after, "r1", "r1")).some((value) => value > 0));
+  // The lock on the names: the list this module declares ignored is exactly the
+  // experiment layer's two types, so neither side can drift without a failure.
+  assert.deepEqual([...RELATIONSHIP_IGNORED_EVENT_TYPES], [RUN_MANIFEST_EVENT_TYPE, INJECTION_COST_EVENT_TYPE]);
 });
 
 /**
