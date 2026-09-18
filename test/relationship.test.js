@@ -245,6 +245,74 @@ test("omitting asOfTick derives the whole log rather than dropping it", () => {
   assert.deepEqual(whole, deriveRelationships({ events: log(), roomId: ROOM, asOfTick: 8 }));
 });
 
+test("the transition behind an unresolved disagreement is part of the basis", () => {
+  // R45: counting a disagreement from the entry's *final* status is still a read
+  // of the event that carried that status, so the pair must be able to name it —
+  // and its tick must reflect it. Without this, the snapshot's derivedFromCount
+  // would understate the evidence and pair.tick would understate the horizon.
+  const events = [
+    membersEvent(),
+    transition({ id: "d1", tick: 1, at: 1, payload: { entryId: "e9", revision: 1, kind: "dispute", action: "record",
+      status: "open", ownerSessionId: "o1" } }),
+    transition({ id: "d2", tick: 2, at: 2, payload: { entryId: "e9", revision: 2, kind: "dispute", action: "amend",
+      status: "in_progress", ownerSessionId: "o1" } })
+  ];
+  const result = deriveRelationships({ events, roomId: ROOM, asOfTick: 2 });
+  expectTarget(result, "o1", { unresolvedDisagreements: 1 });
+  const pair = result.pairs.find((item) => item.observer === "o1" && item.target === "o1");
+  assert.ok(pair.derivedFrom.includes("d1"), "the event that established the dispute is evidence");
+  assert.ok(pair.derivedFrom.includes("d2"), "the event that fixed the final status is evidence");
+  assert.equal(pair.tick, 2);
+  assert.ok(result.derivedFrom.includes("d2"), "the result's basis carries it too");
+});
+
+test("the replaced proposal's own transition is part of the basis", () => {
+  // The same class as R45: the replaced proposal's record is read to learn who
+  // proposed it, so it belongs in the basis even though its counter is
+  // incremented by the replacement. The replaced proposal arrives as a ledger
+  // transition and its replacement via the charter family, so both spellings of
+  // that read are on one path.
+  const events = [
+    membersEvent(),
+    transition({ id: "c1", tick: 1, at: 1, payload: { entryId: "P1", revision: 1, kind: "charter", action: "propose",
+      status: "pending", proposerSessionId: "o1" } }),
+    charter({ id: "c2", tick: 2, at: 2, payload: { proposalId: "P2", proposerSessionId: "o2", replacesProposalId: "P1" } })
+  ];
+  const result = deriveRelationships({ events, roomId: ROOM, asOfTick: 2 });
+  expectTarget(result, "o1", { charterProposalsSuperseded: 1 });
+  const pair = result.pairs.find((item) => item.observer === "o1" && item.target === "o1");
+  assert.ok(pair.derivedFrom.includes("c1"), "the replaced proposal's own record is evidence");
+  assert.ok(pair.derivedFrom.includes("c2"), "the replacement is evidence");
+  assert.equal(pair.tick, 2);
+});
+
+test("a replacement beyond the horizon is not evidence on any path", () => {
+  // R46: the superseded-proposal pass used to walk the unfiltered log, so an
+  // event the cutoff excluded still raised a pair's tick and entered its basis
+  // while changing no counter. Two replacements of one proposal pin that down:
+  // the in-horizon one counts and is named; the out-of-horizon one is invisible,
+  // so the count is exactly 1 rather than 2.
+  const events = [
+    membersEvent(),
+    transition({ id: "p1", tick: 2, at: 2, payload: { entryId: "P1", revision: 1, kind: "charter", action: "propose",
+      status: "pending", proposerSessionId: "o1" } }),
+    transition({ id: "c3", tick: 3, at: 3, payload: { entryId: "P2", revision: 1, kind: "charter", action: "propose",
+      status: "pending", proposerSessionId: "o2", replacesProposalId: "P1" } }),
+    transition({ id: "c9", tick: 9, at: 9, payload: { entryId: "P3", revision: 1, kind: "charter", action: "propose",
+      status: "pending", proposerSessionId: "o2", replacesProposalId: "P1" } })
+  ];
+  const result = deriveRelationships({ events, roomId: ROOM, asOfTick: 4 });
+  expectTarget(result, "o1", { charterProposalsSuperseded: 1 });
+  const pair = result.pairs.find((item) => item.observer === "o1" && item.target === "o1");
+  // The tick is the in-horizon replacement's, the basis names the replaced
+  // proposal's own record and that replacement, and the excluded event is
+  // neither in the pair's basis nor in the result's.
+  assert.equal(pair.tick, 3, "an excluded event must not raise the pair's tick");
+  assert.deepEqual(pair.derivedFrom.filter((id) => id !== "t8"), ["c3", "p1"]);
+  assert.ok(!pair.derivedFrom.includes("c9"));
+  assert.ok(!result.derivedFrom.includes("c9"));
+});
+
 test("the fixture exercises every counter, so one cannot pass by staying at zero", () => {
   // A counter no assertion ever sees as non-zero is a counter this suite cannot
   // distinguish from an unimplemented one; this fails loudly in that case.
@@ -344,6 +412,13 @@ test("derivedFrom is sorted, de-duplicated, and only names events the derivation
   assert.deepEqual(result.derivedFrom, sorted);
   assert.ok(result.derivedFrom.includes("t8"), "membership evidence is part of the basis");
   assert.ok(result.derivedFrom.includes("t19"), "an event that moved a counter is part of the basis");
+  // The clause in this test's name: every id it returns must exist in the log it
+  // was given. A basis naming an event the caller never passed is unusable as
+  // provenance, and this is the assertion that catches this module growing one.
+  const known = new Set(log().map((item) => item.id));
+  for (const id of [...result.derivedFrom, ...result.pairs.flatMap((pair) => pair.derivedFrom)]) {
+    assert.ok(known.has(id), `basis names an event the log does not contain: ${id}`);
+  }
   const union = new Set(result.pairs.flatMap((pair) => pair.derivedFrom));
   assert.deepEqual([...union].sort(), sorted, "the result's basis is the union of its pairs'");
 });
