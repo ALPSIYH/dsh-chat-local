@@ -924,6 +924,34 @@ test("the tool reads through the one projection the route returns", async () => 
   }
 });
 
+test("the tool selects the caller's own row, not the first observer's", async () => {
+  // Today the real projection gives every observer the same numbers for one
+  // target, so comparing the tool's row against `matrix.s1` cannot tell "my row"
+  // from "whoever's row came first". A stub with distinct per-observer counters
+  // can, and that is the claim under test: the selection is keyed by the calling
+  // session. The prototype is patched so the patch reaches the registry inside
+  // `apply`, and restored in `finally` so no other test can see it.
+  const project = DshChatLocalService.prototype.relationships;
+  DshChatLocalService.prototype.relationships = async () => ({
+    s1: { s1: { ...ALL_ZERO, messagesAuthored: 11 }, s2: { ...ALL_ZERO, messagesAuthored: 12 } },
+    s2: { s1: { ...ALL_ZERO, messagesAuthored: 21 }, s2: { ...ALL_ZERO, messagesAuthored: 22 } }
+  });
+  let plugin;
+  try {
+    plugin = await bootPlugin();
+    const room = await plugin.request("/rooms", { name: "取行", autoDeliver: false,
+      members: [{ kind: "session", sessionId: "s1", alias: "甲" }, { kind: "session", sessionId: "s2", alias: "乙" }] });
+    const tool = plugin.registered.get("chat_relationships");
+    assert.deepEqual(await tool.execute({ room: room.id }, exec("s2")), { observer: "s2", targets: {
+      s1: { ...ALL_ZERO, messagesAuthored: 21 }, s2: { ...ALL_ZERO, messagesAuthored: 22 } } });
+    assert.deepEqual(await tool.execute({ room: room.id }, exec("s1")), { observer: "s1", targets: {
+      s1: { ...ALL_ZERO, messagesAuthored: 11 }, s2: { ...ALL_ZERO, messagesAuthored: 12 } } });
+  } finally {
+    if (plugin) await plugin.close();
+    DshChatLocalService.prototype.relationships = project;
+  }
+});
+
 test("a room with no snapshot projects nothing, and neither surface appends an event", async () => {
   const plugin = await bootPlugin();
   try {
