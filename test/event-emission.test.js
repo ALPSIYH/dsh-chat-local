@@ -383,6 +383,18 @@ test("a delivery transition on the room a restore replaces is never appended", a
     const call = await waitFor(() => h.calls[0], "the member delivery");
     // The state to come back to, taken before the member's turn moves anything.
     const snapshot = JSON.parse((await h.service.snapshotRun(h.room.id, "cfg")).content);
+    // "Never appended" is a claim about what the service hands the log's writer,
+    // so that is where it is observed. Asserting on the log *after* the restore
+    // cannot decide it: `restoreFromSnapshot` replaces the whole file, so a
+    // phantom append this restore's own save flushed and the replace then
+    // overwrote leaves the file byte-equal to the snapshot and satisfies the
+    // comparison through the replacement rather than through the guard.
+    const attempts = [];
+    const append = h.service.eventLog.append.bind(h.service.eventLog);
+    h.service.eventLog.append = (roomId, input) => {
+      attempts.push({ roomId, type: input?.type, status: input?.payload?.status ?? null });
+      return append(roomId, input);
+    };
     // The member's turn is open and unfinished, so its delivery is live and its
     // capture is still pending when the restore swaps the room underneath it.
     await h.service.observeSessionEvent(call.to, { type: "turn/start", data: { turn: 1 } });
@@ -394,9 +406,11 @@ test("a delivery transition on the room a restore replaces is never appended", a
     assert.equal(live.at(-1).status, "working", "the delivery must be live when the room is replaced");
     const restored = await h.service.restoreFromSnapshot(snapshot, { confirm: true });
     assert.equal(restored.roomId, h.room.id);
-    const events = await h.service.eventsFor(h.room.id);
     // The superseded transitions were queued against the replaced room object,
     // and the save that carried them wrote the restored room instead.
+    assert.deepEqual(attempts.filter((attempt) => attempt.status === "superseded"), [],
+      "a transition on the replaced room reached the log's writer");
+    const events = await h.service.eventsFor(h.room.id);
     assert.deepEqual(events.filter((event) => event.type === "delivery.settled"
       && event.payload.status === "superseded"), []);
     // Nothing else from the discarded room survives either: the log is exactly
