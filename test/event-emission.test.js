@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DshChatLocalService } from "../lib/room-store.js";
 import { verifyChain } from "../lib/event-log.js";
-import { deriveRelationships } from "../lib/relationship.js";
+import { deriveRelationships, latestRelationships, RELATIONSHIP_VERSION } from "../lib/relationship.js";
 
 async function waitFor(predicate, label = "condition") {
   const deadline = Date.now() + 2_000;
@@ -838,4 +838,161 @@ test("a disposition is reported once, by the transition that recorded it (M1)", 
     const commentId = events.at(-1).id;
     assert.equal(result.pairs.some((pair) => pair.derivedFrom.includes(commentId)), false);
   } finally { await h.cleanup(); }
+});
+
+/** Wait until the active turn has fully ended, so the next send is a new turn. */
+async function quiesce(service, roomId) {
+  await waitFor(async () => (await service.resolveRoom(roomId)).orchestration?.state === "idle", "the turn to end");
+}
+
+/** Every `relationship.snapshot` in a room's log, oldest first. */
+async function snapshotsOf(service, roomId) {
+  return (await service.eventsFor(roomId)).filter((event) => event.type === "relationship.snapshot");
+}
+
+test("a turn records one relationship snapshot equal to the derivation that precedes it", async () => {
+  const h = await harness({ autoDeliver: true });
+  // Two members, one of whom the message names: the room holds a second pair
+  // axis that the turn never delivers to, so the snapshot's pair set cannot be
+  // guessed from who ran.
+  await h.service.addMember(h.room.id, { kind: "session", sessionId: "s2", alias: "成员二" });
+  await h.service.send({ roomId: h.room.id, author: "human:me", authorKind: "human", text: "开始",
+    mentions: ["s1"] });
+  const call = await waitFor(() => h.calls[0], "the member delivery");
+  await replyTo(h.service, call, "回复");
+  const events = await waitFor(async () => {
+    const found = await h.service.eventsFor(h.room.id);
+    return found.some((event) => event.type === "relationship.snapshot") ? found : undefined;
+  }, "the relationship snapshot");
+  const snapshots = events.filter((event) => event.type === "relationship.snapshot");
+  assert.equal(snapshots.length, 1, "one scheduled turn, one snapshot");
+  const index = events.indexOf(snapshots[0]);
+  const scheduled = events.findIndex((event) => event.type === "turn.scheduled");
+  assert.ok(scheduled >= 0, "the turn must be scheduled");
+  assert.ok(index > scheduled, "the snapshot observes the turn that precedes it");
+  // The pair list must be the derivation of exactly the events before it — no
+  // recomputation with other arguments, no reordering, no omission.
+  const derived = deriveRelationships({ events: events.slice(0, index), roomId: h.room.id,
+    asOfTick: snapshots[0].payload.asOfTick });
+  assert.deepEqual(snapshots[0].payload.pairs, derived.pairs);
+  assert.deepEqual(snapshots[0].payload.pairs.map((pair) => `${pair.observer}->${pair.target}`),
+    ["s1->s1", "s1->s2", "s2->s1", "s2->s2"], "every ordered member pair, in the derivation's order");
+  assert.equal(snapshots[0].payload.derivedFromCount, derived.derivedFrom.length);
+  assert.equal(snapshots[0].payload.version, RELATIONSHIP_VERSION);
+  assert.equal(snapshots[0].payload.asOfTick, snapshots[0].tick);
+  assert.equal(snapshots[0].provenance.roomId, h.room.id);
+  assert.deepEqual(verifyChain(events), { ok: true, brokenAt: null });
+  // The snapshot is an observation of the turn, never an input to it: the turn
+  // still ran exactly the schedule `turn.scheduled` recorded, and the member it
+  // never named was never woken.
+  assert.deepEqual(h.calls.map((entry) => entry.to), events[scheduled].payload.executed);
+  assert.deepEqual(events[scheduled].payload.executed, ["s1"]);
+  await h.service.close();
+});
+
+test("every scheduled turn appends its own snapshot, and the projection moves to the newest", async () => {
+  const h = await harness({ autoDeliver: true });
+  await h.service.send({ roomId: h.room.id, author: "human:me", authorKind: "human", text: "一" });
+  const first = await waitFor(() => h.calls[0], "the first delivery");
+  await replyTo(h.service, first, "甲");
+  await waitFor(async () => (await snapshotsOf(h.service, h.room.id)).length === 1, "the first snapshot");
+  await quiesce(h.service, h.room.id);
+  await h.service.send({ roomId: h.room.id, author: "human:me", authorKind: "human", text: "二" });
+  const second = await waitFor(() => h.calls[1], "the second delivery");
+  await replyTo(h.service, second, "乙");
+  const events = await waitFor(async () => {
+    const found = await h.service.eventsFor(h.room.id);
+    return found.filter((event) => event.type === "relationship.snapshot").length >= 2 ? found : undefined;
+  }, "the second snapshot");
+  const snapshots = events.filter((event) => event.type === "relationship.snapshot");
+  assert.deepEqual(snapshots.map((event) => event.payload.asOfTick), [1, 2]);
+  const pairOf = (event) => event.payload.pairs.find((pair) => pair.observer === "s1" && pair.target === "s1");
+  // The first snapshot is taken as the first turn is scheduled, before its own
+  // delivery; the second turn's snapshot already sees the reply that delivery
+  // produced. That difference is what makes "the projection moved" visible.
+  assert.equal(pairOf(snapshots[0]).counters.messagesAuthored, 0);
+  assert.equal(pairOf(snapshots[1]).counters.messagesAuthored, 1);
+  const projected = latestRelationships(events, h.room.id);
+  assert.deepEqual(projected.s1.s1, pairOf(snapshots[1]).counters);
+  await h.service.close();
+});
+
+test("an unreadable event log does not fail the turn that would have been snapshotted", async () => {
+  const h = await harness({ autoDeliver: true });
+  // A regular file where the per-room log directory belongs makes both the read
+  // the snapshot needs and every append fail, so the audit side cannot succeed
+  // by accident. Creating the room is itself a membership fact, so the directory
+  // already exists and is replaced rather than written over.
+  await rm(join(h.directory, "events"), { recursive: true, force: true });
+  await writeFile(join(h.directory, "events"), "not a directory", "utf8");
+  await assert.doesNotReject(async () => {
+    await h.service.send({ roomId: h.room.id, author: "human:me", authorKind: "human", text: "仍然成功" });
+  });
+  const call = await waitFor(() => h.calls[0], "the member delivery despite the audit failure");
+  await replyTo(h.service, call, "回复");
+  await quiesce(h.service, h.room.id);
+  assert.equal(h.service.logHealth().failed >= 1, true);
+  // The turn ran to the end and the reply reached the room: an audit failure is
+  // counted, never fatal.
+  assert.equal((await h.service.resolveRoom(h.room.id)).orchestration.state, "idle");
+  assert.equal((await h.service.messages(h.room.id)).some((message) => message.text === "回复"), true);
+  await h.service.close();
+});
+
+test("a snapshot whose save never lands is not appended to the log", async () => {
+  const h = await harness({ autoDeliver: true });
+  const path = join(h.directory, "rooms.json");
+  const read = h.service.eventLog.read.bind(h.service.eventLog);
+  let broken = false;
+  // The log read is the last thing that happens before the snapshot is queued,
+  // so replacing it with one that breaks the state file first puts the failure
+  // exactly between the queue and the save that would flush it — no timing
+  // window to sample.
+  h.service.eventLog.read = async (...args) => {
+    const events = await read(...args);
+    if (!broken) { broken = true; await rm(path); await mkdir(path); }
+    return events;
+  };
+  await h.service.send({ roomId: h.room.id, author: "human:me", authorKind: "human", text: "不会落地" });
+  await waitFor(async () => (await h.service.resolveRoom(h.room.id)).orchestration?.state === "failed",
+    "the turn to fail on the unlandable save");
+  // The snapshot describes a turn whose save never landed, so it must not exist:
+  // appending it directly would describe state that did not reach disk (R20).
+  assert.deepEqual(await snapshotsOf(h.service, h.room.id), []);
+  // Put the state file back so the shutdown's own save can land, and check that
+  // what the failed save left behind is still a valid chain.
+  await rm(path, { recursive: true, force: true });
+  await h.service.close();
+  const events = await h.service.eventsFor(h.room.id);
+  assert.deepEqual(verifyChain(events), { ok: true, brokenAt: null });
+});
+
+/** Canonical JSON: keys sorted at every depth, exactly as the log serialises. */
+function canonical(value) {
+  if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonical(value[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value ?? null);
+}
+
+test("the snapshot on disk is byte-for-byte the derivation the log replays it as", async () => {
+  const h = await harness({ autoDeliver: true });
+  await h.service.send({ roomId: h.room.id, author: "human:me", authorKind: "human", text: "开始" });
+  const call = await waitFor(() => h.calls[0], "the member delivery");
+  await replyTo(h.service, call, "回复");
+  const events = await waitFor(async () => {
+    const found = await h.service.eventsFor(h.room.id);
+    return found.some((event) => event.type === "relationship.snapshot") ? found : undefined;
+  }, "the relationship snapshot");
+  const snapshot = events.find((event) => event.type === "relationship.snapshot");
+  const prefix = events.slice(0, events.indexOf(snapshot));
+  // Replaying the log alone must reproduce the stored snapshot exactly, down to
+  // the bytes of its canonical serialisation: no field added or dropped, no pair
+  // reordered, no dependence on the Map the derivation built internally.
+  const replayed = deriveRelationships({ events: prefix, roomId: h.room.id, asOfTick: snapshot.payload.asOfTick });
+  assert.equal(canonical(snapshot.payload.pairs), canonical(replayed.pairs));
+  assert.equal(canonical(deriveRelationships({ events: prefix, roomId: h.room.id,
+    asOfTick: snapshot.payload.asOfTick }).pairs), canonical(replayed.pairs));
+  await h.service.close();
 });

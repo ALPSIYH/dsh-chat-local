@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { RELATIONSHIP_VERSION, deriveRelationships } from "../lib/relationship.js";
+import { RELATIONSHIP_VERSION, deriveRelationships, latestRelationships } from "../lib/relationship.js";
 
 /**
  * These tests build event envelopes by hand instead of driving a room, because
@@ -82,6 +82,21 @@ function turn({ id, tick, at, roster }) {
 /** The observers a derivation admits, in the pair order it emits them. */
 function observers(result) {
   return [...new Set(result.pairs.map((pair) => pair.observer))];
+}
+
+/**
+ * A `relationship.snapshot` envelope as the store's writer emits one. The
+ * projection reads only the fields below, so a fixture built here and a snapshot
+ * produced by a real turn are the same shape.
+ */
+function snapshot({ id, tick, at, pairs, version = RELATIONSHIP_VERSION, derivedFromCount = 0 }) {
+  return event({ id, type: "relationship.snapshot", tick, at,
+    payload: { pairs, version, derivedFromCount, asOfTick: tick } });
+}
+
+/** One `Pair` as `deriveRelationships` emits it, with counters overridden. */
+function pair(observer, target, counters = {}, tick = 0) {
+  return { observer, target, tick, counters: { ...ALL_ZERO, ...counters }, derivedFrom: [] };
 }
 
 /**
@@ -569,5 +584,146 @@ test("a membership event beyond the horizon is not evidence on any path", () => 
   assert.deepEqual(observers(result), ["o1"]);
   assert.ok(!result.derivedFrom.includes("ma3"));
   assert.deepEqual(observers(deriveRelationships({ events, roomId: ROOM, asOfTick: 9 })), ["o1", "o3"]);
+});
+
+/**
+ * The projection reads the snapshots out of the log. It reports what a snapshot
+ * stated about a pair — it never derives, so a log whose counters are all
+ * derivable still projects nothing until a snapshot says so.
+ */
+test("the projection of an empty log carries no pairs", () => {
+  assert.deepEqual(latestRelationships([], ROOM), {});
+});
+
+test("a log with no relationship.snapshot projects no pairs", () => {
+  assert.deepEqual(latestRelationships(log(), ROOM), {});
+  assert.deepEqual(latestRelationships([membersEvent(), message({ id: "t2", author: "o1", tick: 1, at: 2 })], ROOM), {});
+});
+
+test("the projection carries the counters of the snapshot that covers each pair", () => {
+  const events = [
+    membership({ id: "ma1", sessionId: "o1" }),
+    snapshot({ id: "s1", tick: 1, at: 1, pairs: [
+      pair("o1", "o1", { messagesAuthored: 1 }),
+      pair("o1", "o2", { deliveryFailures: 2, deliveriesOffered: 3 })
+    ] })
+  ];
+  assert.deepEqual(latestRelationships(events, ROOM), {
+    o1: {
+      o1: { ...ALL_ZERO, messagesAuthored: 1 },
+      o2: { ...ALL_ZERO, deliveryFailures: 2, deliveriesOffered: 3 }
+    }
+  });
+});
+
+test("a later snapshot moves every pair it covers", () => {
+  const events = [
+    membership({ id: "ma1", sessionId: "o1" }),
+    membership({ id: "ma2", sessionId: "o2" }),
+    snapshot({ id: "s1", tick: 1, at: 1, pairs: [pair("o1", "o2", { messagesAuthored: 1 })] }),
+    snapshot({ id: "s2", tick: 2, at: 2, pairs: [pair("o1", "o2", { messagesAuthored: 4 })] })
+  ];
+  const projected = latestRelationships(events, ROOM);
+  assert.equal(projected.o1.o2.messagesAuthored, 4);
+  // Two snapshots do not merge: the newer statement replaces the older one
+  // wholesale rather than adding to it.
+  assert.deepEqual(projected, { o1: { o2: { ...ALL_ZERO, messagesAuthored: 4 } } });
+});
+
+test("a pair the latest snapshot no longer covers keeps the last snapshot that did", () => {
+  // A snapshot is not assumed complete: a pair the newest one omits is read from
+  // the newest snapshot that names it, rather than being dropped or reported as
+  // zero, because the most recent statement about that pair is the true one.
+  const events = [
+    membership({ id: "ma1", sessionId: "o1" }),
+    snapshot({ id: "s1", tick: 1, at: 1, pairs: [pair("o1", "o2", { messagesAuthored: 1 })] }),
+    snapshot({ id: "s2", tick: 2, at: 2, pairs: [pair("o1", "o1", { messagesAuthored: 9 })] })
+  ];
+  assert.deepEqual(latestRelationships(events, ROOM), {
+    o1: {
+      o1: { ...ALL_ZERO, messagesAuthored: 9 },
+      o2: { ...ALL_ZERO, messagesAuthored: 1 }
+    }
+  });
+});
+
+test("the newest snapshot is the last in the log order, not the last in the array", () => {
+  const events = [
+    membership({ id: "ma1", sessionId: "o1" }),
+    snapshot({ id: "s2", tick: 2, at: 2, pairs: [pair("o1", "o1", { messagesAuthored: 4 })] }),
+    snapshot({ id: "s1", tick: 1, at: 1, pairs: [pair("o1", "o1", { messagesAuthored: 1 })] })
+  ];
+  assert.equal(latestRelationships(events, ROOM).o1.o1.messagesAuthored, 4);
+});
+
+test("projecting a shuffled log gives the same result", () => {
+  const events = [
+    membership({ id: "ma1", sessionId: "o1" }),
+    membership({ id: "ma2", sessionId: "o2" }),
+    snapshot({ id: "s1", tick: 1, at: 1, pairs: [pair("o1", "o1"), pair("o1", "o2", { messagesAuthored: 1 })] }),
+    message({ id: "t2", author: "o1", tick: 2, at: 2 }),
+    snapshot({ id: "s2", tick: 2, at: 2, pairs: [pair("o1", "o1", { messagesAuthored: 1 }), pair("o1", "o2", { messagesAuthored: 1 })] })
+  ];
+  const ordered = latestRelationships(events, ROOM);
+  for (const seed of [1, 2, 3, 99]) {
+    assert.deepEqual(latestRelationships(shuffle(events, seed), ROOM), ordered, `seed ${seed}`);
+  }
+});
+
+test("two projections of the same log serialise to the same bytes, with sorted keys", () => {
+  const events = [
+    membership({ id: "ma2", sessionId: "o2" }),
+    membership({ id: "ma1", sessionId: "o1" }),
+    snapshot({ id: "s1", tick: 1, at: 1, pairs: [pair("o2", "o1"), pair("o1", "o2"), pair("o1", "o1")] })
+  ];
+  const first = latestRelationships(events, ROOM);
+  const second = latestRelationships(events, ROOM);
+  assert.equal(JSON.stringify(first), JSON.stringify(second));
+  // A plain object's insertion order is observable in its JSON, so the
+  // observers and targets are inserted in code-unit order rather than in the
+  // order the snapshot happened to list them.
+  assert.deepEqual(Object.keys(first), ["o1", "o2"]);
+  assert.deepEqual(Object.keys(first.o1), ["o1", "o2"]);
+  assert.deepEqual(Object.keys(first.o2), ["o1"]);
+});
+
+test("a snapshot from another room is not this room's current relationship", () => {
+  const foreign = event({ id: "x1", type: "relationship.snapshot", tick: 1, at: 1,
+    payload: { pairs: [pair("f1", "f2", { messagesAuthored: 7 })], version: RELATIONSHIP_VERSION,
+      derivedFromCount: 0, asOfTick: 1 },
+    provenance: { roomId: OTHER_ROOM } });
+  assert.deepEqual(latestRelationships([foreign], ROOM), {});
+  assert.equal(latestRelationships([foreign], OTHER_ROOM).f1.f2.messagesAuthored, 7);
+});
+
+test("the projection copies the counters and never mutates the log", () => {
+  // The projection is a read: a caller that amends what it got back must not
+  // thereby rewrite the snapshot the log holds.
+  const events = [
+    membership({ id: "ma1", sessionId: "o1" }),
+    snapshot({ id: "s1", tick: 1, at: 1, pairs: [pair("o1", "o1", { messagesAuthored: 1 })] })
+  ];
+  const before = JSON.stringify(events);
+  const projected = latestRelationships(events, ROOM);
+  projected.o1.o1.messagesAuthored = 99;
+  assert.equal(events[1].payload.pairs[0].counters.messagesAuthored, 1, "the log keeps its own value");
+  assert.equal(JSON.stringify(events), before, "the input is not mutated");
+});
+
+test("a malformed snapshot is skipped rather than guessed at", () => {
+  const events = [
+    event({ id: "s1", type: "relationship.snapshot", tick: 1, at: 1, payload: { pairs: "not an array" } }),
+    event({ id: "s2", type: "relationship.snapshot", tick: 2, at: 2, payload: { pairs: [
+      null, { observer: "o1" }, { observer: "o1", target: "o2" },
+      pair("o1", "o1", { messagesAuthored: 3 })
+    ] } })
+  ];
+  assert.deepEqual(latestRelationships(events, ROOM), { o1: { o1: { ...ALL_ZERO, messagesAuthored: 3 } } });
+});
+
+test("input the projection cannot interpret is refused rather than guessed at", () => {
+  assert.throws(() => latestRelationships(log(), undefined), TypeError);
+  assert.throws(() => latestRelationships({}, ROOM), TypeError);
+  assert.throws(() => latestRelationships([], ""), TypeError);
 });
 
