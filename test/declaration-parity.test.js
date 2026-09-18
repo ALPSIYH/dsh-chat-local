@@ -18,16 +18,23 @@ import { DshChatLocalService } from "../lib/room-store.js";
  * The declared names are read by scanning the class body at brace depth, not by
  * matching method-shaped text: a source scan is fooled by control-flow lines
  * (`for (`, `if (`) and misses any declaration not written as `^  name(`. A name
- * is taken only where a class member can start, and the nested `workspace`
- * literal is left to the brace counter. Reflection is the other side: the names
- * on the prototype of a real instance, so a method the class does not actually
- * expose cannot be excused as "internal".
+ * is taken only where a class member can start — leading modifiers included —
+ * and the nested `workspace` literal is left to the brace counter. Reflection is
+ * the other side: the names on the prototype of a real instance, so a method the
+ * class does not actually expose cannot be excused as "internal".
  */
 const here = dirname(fileURLToPath(import.meta.url));
 const DECLARATION = join(here, "..", "lib", "room-store.d.ts");
 // The one member that is not a method, and the constructor itself, which the
 // class holds as a non-enumerable property rather than a described method.
 const NOT_DESCRIBED_AS_METHODS = new Set(["constructor", "workspace"]);
+// Leading modifiers a class member can carry. Matching only lines that begin
+// directly with the name let every modifier-prefixed member through — `private
+// ghostMethod(): void;` and `readonly ghostProp: any;` both passed — which is
+// exactly the drift this test exists to make unmergeable. A modifier is only
+// consumed when whitespace follows it, so a member genuinely named `readonly`
+// or `get` (`readonly: boolean;`) is still read as that name.
+const LEADING_MODIFIERS = /^(?:(?:public|private|protected|readonly|static|abstract|declare|override|async|get|set)\s+)+/u;
 
 /** The method and property names declared on the class in a `.d.ts` source. */
 function declaredNames(source) {
@@ -35,8 +42,9 @@ function declaredNames(source) {
   let depth = 0;
   for (const raw of source.split(/\r?\n/)) {
     const line = raw.trim();
+    const body = line.replace(LEADING_MODIFIERS, "");
     const member = depth === 1 && !line.startsWith("//") && !line.startsWith("*") && !line.startsWith("/*")
-      ? /^([A-Za-z_$][A-Za-z0-9_$]*)\s*[:(<]/.exec(line)
+      ? /^([A-Za-z_$][A-Za-z0-9_$]*)\s*[:(<]/.exec(body)
       : null;
     if (member) names.add(member[1]);
     for (const character of line) {
