@@ -13,10 +13,22 @@
 - **回合提示词留档。** 每次回合实际发送的提示词按原样存入日志，作为实验的自变量；它记录的是真实发送的内容，不是重新生成的近似值。
 - **运行快照与恢复。** `GET /rooms/:id/snapshot` 导出房间在某一 tick 的完整事件前缀与配置哈希，`POST /rooms/:id/restore-from-snapshot` 在校验通过后恢复。恢复会同时回退日志链与房间状态，使两者保持一致；校验失败即拒绝，不写入。
 - `/health` 新增 `stateVersion` 与 `audit`（`appended` / `failed` / `lastError` / `droppedCount` / `dropped`），后者即上述日志健康计数；`lastError` 只保留错误码与文件名、不含绝对路径，并在下一次成功写入时清空。
+- **确定性关系计数器。** 关系状态是事件日志的纯函数：`lib/relationship.js` 为房间内每一对「观察者 → 对象」（含自己对自己）派生十个计数器——投递次数与成败、亲手写下的验收结论、阻断报告与被确认、未闭环分歧、被取代的章程提案、署名消息——不读墙钟、不用随机数、不调用模型，同一份日志两次派生逐字节相同且与事件传入顺序无关。
+- **关系快照与只读出口。** 每次排定回合时追加一条 `relationship.snapshot`，只记每个有向对的计数结果与本对最新证据的 tick（不逐对记证据事件 id，证据可按同一纯函数对前缀重新派生）；`GET /rooms/:id/relationships` 返回完整矩阵，`chat_relationships` 只返回调用者本人那一行（计数器 `targets` 与本人现行判断 `appraisals`）。两个出口都不追加任何事件。
+- **成员判断（A 覆盖层）。** `chat_appraise` 让成员对同房间另一成员写下表态：立场、把握、第一人称 `claim`、可选 `perceivedRole`，以及**必填且必须真实存在**的证据事件 id（缺一条即整次拒绝）。撤销是**追加**一条把 `validTo` 设为当前 tick 的新 `appraisal`，原记录逐字节保留；判断不进计数器，只注入判断者本人的提示词。
+- **行动治理门（默认关闭）。** 房间策略新增 `gate`，只有显式为 `true` 才生效，且只收紧、从不放宽。开启后，执行类回合里的工具判定按**行动成员自己**的计数作出：高影响动作在「发给他的投递失败过、从未成功送达」时要求用户确认；可能是评审的动作在他名下还有未闭环分歧时要求独立验收；工具名缺失则拒绝。命中时追加一条 `action_gate` 事件（工具名、判定、风险类别，以及判定依据的计数器快照），不提供交互式审批；快照缺失时两条规则都不成立，动作放行。
+- **关系摘要注入。** 每次唤醒成员时，在提示词里注入该成员自己的计数与现行判断。整段（含两条标题行）硬上限 600 字符，超出时按行丢弃；判断块严格「要么整块出现、要么整块不出现」——`claim` 与 `perceivedRole` 的引用长度都有上限，不截断的是对手方标签（放不下时整块消失）。日志读不出来时整段省略，协作照常。
+- **实验脚手架。** `POST /rooms/:id/relationship-intervention`（`set` / `clear` / `seed`，记录**干预之前**的 counters）与 `POST /rooms/:id/run-manifest`（臂、运行时实际报告的模型、状态版本、起始 tick、注入配置哈希）都不注册为 `chat_*` 工具，只接受 `appliedBy: "human"`，并在房间内有活动回合时以 403 拒绝。`reset_per_episode` 臂在每一局开头自动追加一条 `clear` 干预。每次唤醒另留档 `turn.prompt`（原样提示词）与 `injection.cost`（实际注入的摘要字符数与哈希、整条提示词长度、明确标注为估算的 token 数）。
+- **只读评测脚本。** `node scripts/relationship-eval.mjs` 按每个房间的 `run.manifest` 把日志切成 run，输出因变量与分组后的均值、样本方差、标准差、最小值、最大值与样本数，不写任何文件。分组键是 `(arm, configHash, initialStateVersion, models)`；模型读不到的 run 不与任何 run 合并。**少于 10 个真有成员回合的 run 不给结论**：门槛数的是「注入与一条表示成员真的收到的投递结算对上」的成员回合，不是 manifest 划出的段，也不是单独存在的成本记录；`--min-runs` 只能调高门槛，`--observation` 打印描述统计并明确标注不下结论。
+- **成员增删事件。** `member.added` / `member.removed` 成为成员身份的权威记录，关系派生不再只能从回合名单与投递里推断成员集合。
 
 ### 变更
 
-- **房间状态版本 14 → 15。** 迁移前自动把迁移前的状态文件复制为 `rooms.json.v14.bak`，迁移失败可从该备份恢复。
+- **房间状态版本 14 → 16。** 迁移前自动把迁移前的状态文件复制为 `rooms.json.v<旧版本>.bak`（如 `rooms.json.v14.bak`；旧文件没有 `version` 字段时命名为 `rooms.json.vunversioned.bak`），迁移失败可从该备份恢复。
+- **日志事件类型扩到实验所需的全部事实。** 除消息、投递与调度外，日志现在另记 `ledger.transition`、`member.added` / `member.removed`、`relationship.snapshot`、`appraisal`、`action_gate`、`relationship.intervention`、`run.manifest` 与 `injection.cost`。事件的追加仍跟随状态落盘：一部分经审计队列由把对应状态写进磁盘的那次保存 flush，另一部分（发送路径的 `message.created`、`turn.prompt`、`injection.cost`、干预与 manifest 等）在事实已落盘后直接追加；日志写入失败不会让房间操作失败，只计入健康计数。
+- **`run.manifest` 的 `configHash` 覆盖产生注入文本的代码。** 除常量、模板与开关（含治理门 `gate` 与判断开关 `appraisalDigest`）外，哈希还包含渲染函数体源码与渲染器、计数器派生两处模块的整份源码指纹；改动哈希覆盖范围会让既有 manifest 与新 run 落入不同组，跨这类升级的在跑实验必须重开。manifest 只记录最终哈希，不记录这些项。
+- **章程提案在日志里的表示。** 提案 id 通过 `ledger.transition` 的 `entryId` 表达；插件不发出任何 `charter.*` 事件。
+- **关系状态的可见范围。** 计数器是对象的记录，在每个观察者那里相同；判断是观察者自己的表态，只对本人注入、只经 `chat_relationships` 返回本人那一行。房间主人的只读端点 `GET /rooms/:id/relationships` 与 `GET /rooms/:id/appraisals` 返回完整矩阵，与插件其它端点一样挂在本地回环、不认证调用者。
 
 ## [0.16.2-local.1] — 2026-09-16
 
