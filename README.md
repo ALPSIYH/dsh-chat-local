@@ -174,7 +174,7 @@ dsh plugin --profile web add link:/path/to/dsh-chat-local
 
 **评测。** `node scripts/relationship-eval.mjs [--state <rooms.json>] [--room <id>] [--min-runs <n>] [--observation] [--json]` 只读地打开状态目录（或它的副本），按每个房间的 `run.manifest` 把日志切成 run，输出每个 run 的因变量与**分组后的均值、样本方差、标准差、最小值、最大值**。因变量是接手人选择分布、验收退回率、动作被拒次数、争议未解决时长（单位 tick）与注入字符数；每个定义都写在 `lib/experiment.js` 的 `dependentVariables` 里并注明从哪类事件读，复核者可以用日志自己重算。分组键是 `(arm, configHash, initialStateVersion, models)`：只有四项都相同的 run 才会被合并——配置不同却当成可比，结论就是错的。
 
-- **少于 10 个 run 不给结论。** 默认行为是：只打印每 run 的观察值、把该组标为样本不足、不打印任何跨 run 均值与方差，并以退出码 3 结束。`--observation` 是显式的「仅作观察」模式：打印描述统计并逐条标注「observation (not a conclusion)」，仍然不下结论，退出码 0。`--min-runs` 只能**调高**门槛，调低会被拒绝。
+- **少于 10 个 run 不给结论。** 默认行为是：只打印每 run 的观察值、把该组标为样本不足、不打印任何跨 run 均值与方差，并以退出码 3 结束。门槛数的是**真有交互的 run**，不是 `run.manifest` 划出的段：一个 run 里若没有任何成员回合被唤醒并注入过摘要（即没有 `injection.cost`），它只是「房间被重启了一次」，不计入门槛，也不进入跨 run 统计——连续十次 `startRun` 而什么都没发生，是十次重启，不是十次观测。`--observation` 是显式的「仅作观察」模式：打印描述统计并逐条标注「observation (not a conclusion)」，仍然不下结论，退出码 0。`--min-runs` 只能**调高**门槛，调低会被拒绝。
 - 时长一律用 **`tick`**，不用事件时间戳 `at`。`at` 在同一毫秒内每追加一条就 +1 ms 以保持严格递增，持续的程序化追加可以让它领先墙钟数秒，用它做差得到的是写入者的批次大小，而不是交互时长。
 - 脚本**不写任何东西**：只读日志与头部锚点。链校验不通过的日志会被拒绝分析并列入 `invalid`，而不是被当成数据集。
 

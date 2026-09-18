@@ -392,6 +392,71 @@ test("a FIFO beside the logs is refused with a reason instead of hanging", async
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
+test("ten restarts in an idle room cannot satisfy the gate", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "dcl-eval-restarts-"));
+  const statePath = join(directory, "rooms.json");
+  try {
+    // Ten back-to-back manifests in ONE room, with nothing happening between
+    // them: the reviewer's reproduction. A run's sample unit is an interaction,
+    // not a manifest-delimited segment, so restarting a room ten times must not
+    // stand in for a study — a reader keying on the status or the exit code
+    // would otherwise take ten restarts for ten observations.
+    const restarts = [];
+    for (let index = 1; index <= 10; index += 1) restarts.push(manifest({ tick: index }));
+    await writeLog(statePath, "restarted", restarts);
+    const refused = await runScript(["--state", statePath, "--json"]);
+    assert.equal(refused.code, INSUFFICIENT_EXIT, "ten restarts must not conclude");
+    const report = JSON.parse(refused.stdout);
+    assert.equal(report.status, "insufficient-sample");
+    assert.equal(report.assertsConclusions, false);
+    assert.equal(report.runs.length, 10, "every manifest-bearing segment is still reported");
+    assert.ok(report.runs.every((run) => run.analysable === false));
+    const group = report.groups[0];
+    assert.equal(group.runCount, 10);
+    assert.equal(group.analysableRunCount, 0);
+    assert.equal(group.sufficient, false);
+    assert.equal(group.statistics, null, "a group of restarts states no statistics");
+    assert.match(refused.stderr, /at least 10 are required/u);
+    assert.match(refused.stderr, /0 holding an interaction/u);
+    const text = await runScript(["--state", statePath]);
+    assert.equal(text.code, INSUFFICIENT_EXIT);
+    assert.ok(!/\bresult\b/u.test(text.stdout), "no line may be printed as a result");
+    assert.match(text.stdout, /0 with an interaction/u);
+    assert.match(text.stdout, /no interaction to analyse/u);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test("the gate counts interactions, and the statistics read only those runs", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "dcl-eval-segments-"));
+  const statePath = join(directory, "rooms.json");
+  try {
+    // One room, ten manifest-delimited segments; only three of them hold an
+    // injected member turn. Ten segments are not ten observations, and the three
+    // that are must not have their mean diluted by the seven that are not.
+    const events = [];
+    for (let index = 1; index <= 10; index += 1) {
+      events.push(manifest({ tick: index * 2 - 1 }));
+      if (index <= 3) events.push(event("injection.cost", index * 2, { digestChars: index * 100 }));
+    }
+    await writeLog(statePath, "mixed", events);
+    const refused = await runScript(["--state", statePath, "--json"]);
+    assert.equal(refused.code, INSUFFICIENT_EXIT, refused.stderr);
+    const report = JSON.parse(refused.stdout);
+    assert.equal(report.runs.length, 10);
+    assert.equal(report.runs.filter((run) => run.analysable).length, 3);
+    const group = report.groups[0];
+    assert.equal(group.runCount, 10);
+    assert.equal(group.analysableRunCount, 3);
+    assert.equal(group.sufficient, false);
+    assert.equal(group.statistics, null);
+    const observed = await runScript(["--state", statePath, "--observation", "--json"]);
+    assert.equal(observed.code, 0, observed.stderr);
+    const statistics = JSON.parse(observed.stdout).groups[0].observation;
+    assert.equal(statistics.injectedDigestCharsMean.n, 3, "the seven empty segments contribute no value");
+    assert.equal(statistics.injectedDigestCharsMean.mean, 200);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
 test("the script is read-only: the state directory is byte-identical afterwards", async () => {
   const { directory, statePath } = await stateWithRuns(10);
   try {

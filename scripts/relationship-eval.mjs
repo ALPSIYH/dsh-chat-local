@@ -17,7 +17,9 @@
  *   non-zero. `--observation` switches to the explicit observation-only mode,
  *   which prints descriptive statistics clearly labelled as observations and
  *   still asserts nothing. The threshold cannot be lowered: `--min-runs` may
- *   only raise it.
+ *   only raise it. **The gate counts runs that hold an interaction**, not
+ *   manifest-delimited segments: ten `startRun` calls in an idle room are ten
+ *   restarts, not ten observations, and they conclude nothing.
  * - **Dispersion, never only a mean.** Every concluded group reports the
  *   sample variance, the standard deviation, the minimum and the maximum beside
  *   the mean, together with how many runs contributed a value.
@@ -46,7 +48,8 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { EventLog, eventLogPath, verifyChain } from "../lib/event-log.js";
-import { MIN_RUNS, DEPENDENT_VARIABLE_VERSION, dependentVariables, dispersion, runSegments } from "../lib/experiment.js";
+import { MIN_RUNS, DEPENDENT_VARIABLE_VERSION, dependentVariables, dispersion, hasInteraction,
+  runSegments } from "../lib/experiment.js";
 
 const USAGE = "usage: node scripts/relationship-eval.mjs [--state <rooms.json>] [--room <roomId>] [--min-runs <n>] [--observation] [--json]";
 export const EVAL_FORMAT = "dsh-chat-local-relationship-eval";
@@ -142,10 +145,11 @@ async function collectRuns(statePath, only, log = new EventLog(statePath)) {
     for (const [position, segment] of segments.entries()) {
       if (segment.arm === null) { invalid.push({ roomId, reason: "run manifest states no arm this version knows" }); continue; }
       if (segment.configHash === null) { invalid.push({ roomId, reason: "run manifest states no config hash" }); continue; }
+      const values = dependentVariables({ events: segment.events, roomId });
       runs.push({ roomId, runIndex: position, manifestId: segment.manifestId, arm: segment.arm,
         configHash: segment.configHash, initialStateVersion: segment.initialStateVersion,
         startedAtTick: segment.startedAtTick, tickEnd: segment.tickEnd, models: segment.models,
-        chain: chain.ok, dependentVariables: dependentVariables({ events: segment.events, roomId }) });
+        chain: chain.ok, analysable: hasInteraction(values), dependentVariables: values });
     }
   }
   return { runs, skipped, invalid };
@@ -200,15 +204,22 @@ function groupsOf(runs, minRuns, observation) {
   }
   const groups = [];
   for (const [, bucket] of buckets) {
-    const sufficient = bucket.length >= minRuns;
+    // The gate counts runs that hold an interaction, never manifest-delimited
+    // segments: a room restarted ten times in silence holds ten segments and no
+    // observations, and a group of restarts must not be able to stand in for a
+    // study. The statistics are read from the runs that carry the interaction,
+    // so a stray restart that added no data cannot move a mean either.
+    const analysable = bucket.filter((run) => run.analysable);
+    const sufficient = analysable.length >= minRuns;
     const first = bucket[0];
     const group = { arm: first.arm, configHash: first.configHash, initialStateVersion: first.initialStateVersion,
-      modelsKey: modelsKey(first.models), models: first.models, runCount: bucket.length, sufficient,
-      runIndexes: bucket.map((run) => ({ roomId: run.roomId, runIndex: run.runIndex })),
-      statistics: sufficient ? statisticsFor(bucket) : null,
-      observation: !sufficient && observation ? statisticsFor(bucket) : null };
+      modelsKey: modelsKey(first.models), models: first.models, runCount: bucket.length,
+      analysableRunCount: analysable.length, sufficient,
+      runIndexes: bucket.map((run) => ({ roomId: run.roomId, runIndex: run.runIndex, analysable: run.analysable })),
+      statistics: sufficient ? statisticsFor(analysable) : null,
+      observation: !sufficient && observation && analysable.length > 0 ? statisticsFor(analysable) : null };
     if (!sufficient) {
-      group.insufficientReason = `${bucket.length} run(s); ${minRuns} required before this group states anything`;
+      group.insufficientReason = `this group holds ${analysable.length} run(s) with an interaction; ${minRuns} are required before it states anything`;
     }
     groups.push(group);
   }
@@ -231,13 +242,14 @@ export async function evaluate({ statePath, roomId, minRuns = MIN_RUNS, observat
   const status = concluded.length > 0 ? "conclusive" : (observation ? "observation" : "insufficient-sample");
   const notes = [
     "Runs are pooled only when arm, injection config hash, state version and models all match.",
+    `Only runs holding an interaction count toward the ${minRuns}-run gate: a manifest-delimited segment in which no member turn was ever injected is a restart, and states nothing.`,
     "Every duration is measured in ticks, never in the event stamp `at`.",
     "A group reports sample variance (n-1) and is `null` for a single run."
   ];
   if (concluded.length === 0 && runs.length > 0) {
     notes.push(observation
-      ? `Observation only: no group holds ${minRuns} runs, so these statistics are descriptive and no conclusion is asserted.`
-      : `Refused: no group holds ${minRuns} runs. Re-run with --observation to print descriptive statistics labelled as observations.`);
+      ? `Observation only: no group holds ${minRuns} runs with an interaction, so these statistics are descriptive and no conclusion is asserted.`
+      : `Refused: no group holds ${minRuns} runs with an interaction. Re-run with --observation to print descriptive statistics labelled as observations.`);
   }
   return { format: EVAL_FORMAT, version: EVAL_VERSION,
     dependentVariableVersion: DEPENDENT_VARIABLE_VERSION,
@@ -257,16 +269,18 @@ export function renderText(report) {
     lines.push("run  room                      arm                 reviewReject  refused  disputes  disputeTicks  injectedChars/turn");
     report.runs.forEach((run, index) => {
       const dv = run.dependentVariables;
-      lines.push(`${String(index + 1).padEnd(4)} ${run.roomId.padEnd(24)} ${String(run.arm).padEnd(19)} ${number(dv.reviewRejectionRate).padStart(12)}  ${String(dv.refusedActions).padStart(7)}  ${String(dv.unresolvedDisputes).padStart(8)}  ${number(dv.unresolvedDisputeMeanTicks).padStart(12)}  ${number(dv.injectedDigestCharsMean, 1).padStart(17)}`);
+      lines.push(`${String(index + 1).padEnd(4)} ${run.roomId.padEnd(24)} ${String(run.arm).padEnd(19)} ${number(dv.reviewRejectionRate).padStart(12)}  ${String(dv.refusedActions).padStart(7)}  ${String(dv.unresolvedDisputes).padStart(8)}  ${number(dv.unresolvedDisputeMeanTicks).padStart(12)}  ${number(dv.injectedDigestCharsMean, 1).padStart(17)}${run.analysable ? "" : "  (no interaction: states nothing)"}`);
     });
   }
   for (const group of report.groups) {
     const stats = group.statistics ?? group.observation;
     lines.push("");
     lines.push(`group arm=${group.arm} configHash=${group.configHash.slice(0, 12)}… stateVersion=${group.initialStateVersion}`);
-    lines.push(`  runs ${group.runCount}${group.sufficient ? " (sufficient)" : ` — ${group.insufficientReason}`}`);
+    lines.push(`  runs ${group.runCount} (${group.analysableRunCount} with an interaction)${group.sufficient ? " (sufficient)" : ` — ${group.insufficientReason}`}`);
     if (!stats) {
-      lines.push("  no statistics: a conclusion needs more runs than this group holds");
+      lines.push(group.analysableRunCount === 0
+        ? "  no statistics: this group's runs hold no interaction to analyse"
+        : "  no statistics: a conclusion needs more runs than this group holds");
       continue;
     }
     const label = group.statistics ? "result" : "observation (not a conclusion)";
@@ -319,7 +333,8 @@ async function main() {
   if (options.json) process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
   else process.stdout.write(renderText(report));
   if (report.status === "insufficient-sample") {
-    process.stderr.write(`relationship-eval: ${report.runs.length} run(s) found; at least ${report.requiredRuns} are required per group before any conclusion. Pass --observation to print observations only.\n`);
+    const withInteraction = report.runs.filter((run) => run.analysable).length;
+    process.stderr.write(`relationship-eval: ${report.runs.length} run(s) found, ${withInteraction} holding an interaction; at least ${report.requiredRuns} are required per group before any conclusion. Pass --observation to print observations only.\n`);
     return INSUFFICIENT_EXIT;
   }
   return 0;
