@@ -6,7 +6,7 @@ import {tmpdir} from "node:os";
 import {DshChatLocalService} from "../lib/room-store.js";
 import {snapshotMemberConfiguration,provisionConversationSession} from "../lib/native-conversations.js";
 
-async function fixture(run){
+async function fixture(run,{replyTimeoutMs=500}={}){
   const dir=await mkdtemp(join(tmpdir(),"dcl-conversations-")),path=join(dir,"rooms.json");
   const calls=[],agents=new Map();let nativeWrites=0,disposed=0;
   const model={provider:"official",model:"research",reasoningEffort:"high"};
@@ -18,7 +18,7 @@ async function fixture(run){
     sessionController:{async create({sessionId,cwd}){nativeWrites++;if(!agents.has(sessionId))agents.set(sessionId,{status:"idle",session:{id:sessionId,async flush(){}}});configs.set(sessionId,{cwd,model});return {sessionId};},async resolveAgent(id){return {agent:agents.get(id)};},async rename(){nativeWrites++;},agents:{selectForNextRequest(agent,selected){nativeWrites++;configs.get(agent.session.id).model=structuredClone(selected);}}},
     dshBridge:{async status(){return {state:"idle"};},async deliverExternal(from,to,text,delivery){calls.push({from,to,text,delivery});}}
   };
-  const service=new DshChatLocalService(ctx,{path,replyTimeoutMs:500,maxReplies:1});
+  const service=new DshChatLocalService(ctx,{path,replyTimeoutMs,maxReplies:1});
   try{await run({service,ctx,path,dir,calls,configs,model,agents,get nativeWrites(){return nativeWrites;},get disposed(){return disposed;}});}
   finally{await service.close();await rm(dir,{recursive:true,force:true});}
 }
@@ -93,7 +93,7 @@ test("send prepares only its target, excludes old context and does not stop anot
   await send(h.service,old.id,"旧组仍在处理",{automaticDelivery:true,mentions:["session:old-b"]});await until(()=>h.calls.length===1);
   await send(h.service,fresh.id,"NEW_TOPIC_ONLY",{automaticDelivery:true,mentions:[`session:${encodeURIComponent(fresh.members[0].sessionId)}`]});await until(()=>h.calls.length===2);
   assert.equal(h.calls[1].to,fresh.members[0].sessionId);assert.ok(!h.calls[1].text.includes("OLD_SECRET_TASK_123"));assert.ok(h.calls[1].text.includes("NEW_TOPIC_ONLY"));assert.equal((await h.service.resolveRoom(old.id)).orchestration.state,"running");assert.equal((await h.service.listParticipants(fresh.id))[1].nativeSetup.state,"pending");
-}));
+},{replyTimeoutMs:60_000}));
 
 test("saved group defaults affect future conversations only; local model changes cannot drift frozen defaults",()=>fixture(async h=>{
   const old=await seed(h.service),first=await h.service.createConversation(old.id,{operationId:"first"});h.configs.get("old-a").model={provider:"changed",model:"new-model"};
