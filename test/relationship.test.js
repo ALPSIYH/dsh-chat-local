@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { Readable } from "node:stream";
 import { DshChatLocalService } from "../lib/room-store.js";
 import { apply } from "../lib/index.js";
-import { RELATIONSHIP_VERSION, RELATIONSHIP_IGNORED_EVENT_TYPES, deriveRelationships, latestRelationships, effectiveAppraisals } from "../lib/relationship.js";
+import { RELATIONSHIP_VERSION, RELATIONSHIP_IGNORED_EVENT_TYPES, deriveRelationships, latestRelationships, effectiveAppraisals, sortEvents } from "../lib/relationship.js";
 import { RUN_MANIFEST_EVENT_TYPE, INJECTION_COST_EVENT_TYPE } from "../lib/experiment.js";
 
 /**
@@ -421,6 +421,26 @@ test("two derivations of the same input are byte-identical", () => {
   const first = deriveRelationships({ events: log(), roomId: ROOM, asOfTick: 8 });
   const second = deriveRelationships({ events: log(), roomId: ROOM, asOfTick: 8 });
   assert.equal(JSON.stringify(first), JSON.stringify(second));
+});
+
+test("when two envelopes share (tick, at) the id breaks the tie, and a smaller at reorders", () => {
+  // A caller may state an `at` explicitly, and two statements may be equal. The
+  // append stays strictly ordered on disk, but the sort key `(tick, at)` is then
+  // identical, so the tiebreak is the envelope's own random id rather than
+  // arrival order. The ids here are chosen the opposite way round to show the
+  // tiebreak is read at all.
+  const first = event({ id: "zz-first", type: "message.created", actor: "session:o1", tick: 1, at: 5_000,
+    payload: { messageId: "m-first", roomSeq: 1, text: "first", authorKind: "session", mentions: [] } });
+  const second = event({ id: "aa-second", type: "message.created", actor: "session:o1", tick: 1, at: 5_000,
+    payload: { messageId: "m-second", roomSeq: 2, text: "second", authorKind: "session", mentions: [] } });
+  assert.deepEqual(sortEvents([first, second]).map((item) => item.id), ["aa-second", "zz-first"],
+    "equal (tick, at) is decided by the id, not by arrival order");
+  // A later append that states a smaller `at` is sorted before the earlier one:
+  // explicit stamps are preserved verbatim, so the ordering truth is the sort
+  // key, not the file's line order.
+  const earlier = event({ id: "zz-earlier", type: "message.created", actor: "session:o1", tick: 1, at: 1_000,
+    payload: { messageId: "m-earlier", roomSeq: 1, text: "earlier", authorKind: "session", mentions: [] } });
+  assert.deepEqual(sortEvents([first, earlier]).map((item) => item.id), ["zz-earlier", "zz-first"]);
 });
 
 test("byte-identical output does not depend on the key order events were built in", () => {
