@@ -4,11 +4,34 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createEvent, hashEvent, serializeEvent, verifyChain, EVENT_LOG_VERSION, EventLog } from "../lib/event-log.js";
+import { deriveRelationships } from "../lib/relationship.js";
 
 /** A log in its own temp directory, with the room log path the anchor sits beside. */
 async function temporaryLog() {
   const directory = await mkdtemp(join(tmpdir(), "dcl-events-"));
   return { directory, log: new EventLog(join(directory, "rooms.json")), path: join(directory, "events", "r1.jsonl") };
+}
+
+/**
+ * Run `body` with `Date.now` pinned to one value, restoring the real clock
+ * afterwards. Tests in a file run sequentially, so this cannot leak into a
+ * neighbouring test; pinning the clock is what makes "same millisecond"
+ * provable rather than sampled.
+ */
+async function withFrozenClock(now, body) {
+  const real = Date.now;
+  Date.now = () => now;
+  try {
+    return await body();
+  } finally {
+    Date.now = real;
+  }
+}
+
+/** One `ledger.transition` append for the frozen-clock derivations below. */
+function transitionInput(payload) {
+  return { type: "ledger.transition", actor: { kind: "session", id: "s1" }, payload,
+    provenance: { roomId: "r1", actorId: "s1" } };
 }
 
 test("an event carries version, provenance and a hash over its own content", () => {
@@ -326,6 +349,107 @@ test("priming a log it cannot verify leaves it cold, so the truncation still sur
   assert.equal(await reopened.append("r1", { type: "c", actor: { kind: "system", id: "system" }, payload: {} }), null);
   assert.match(reopened.health().lastError, /truncated/);
   assert.equal(reopened.health().failed, 1);
+});
+
+test("same-millisecond appends get strictly increasing at and are derived in append order", async () => {
+  const { log } = await temporaryLog();
+  const now = 1_800_000_000_000;
+  // Every append below happens at the same wall-clock reading: the guard, not
+  // the clock, is what orders them.
+  const events = await withFrozenClock(now, async () => {
+    await log.append("r1", { type: "turn.scheduled", tick: 1, actor: { kind: "system", id: "system" },
+      payload: { rootMessageId: "m1", epoch: 1, recipients: ["s1"], order: "configured", rotationStart: 0,
+        executed: ["s1"] }, provenance: { roomId: "r1" } });
+    // A blocked report and the resume that retires it, written back to back. An
+    // unguarded log stamps both with `at = now`; the derivation then breaks the
+    // `(tick, at)` tie with the events' random UUIDs, and whether the report is
+    // seen before its confirmation — `blockedConfirmed` 1 or 0 — is luck.
+    await log.append("r1", transitionInput({ entryId: "e1", revision: 1, kind: "task", action: "progress",
+      status: "blocked", ownerSessionId: "s1", state: "blocked" }));
+    await log.append("r1", transitionInput({ entryId: "e1", revision: 2, kind: "task", action: "progress",
+      status: "open", ownerSessionId: "s1", state: "in_progress" }));
+    assert.equal(Date.now(), now, "the clock must not move inside the frozen window");
+    return log.read("r1");
+  });
+  assert.deepEqual(events.map((event) => event.type), ["turn.scheduled", "ledger.transition", "ledger.transition"]);
+  // The invariant the fix exists for: append order is the order, and it is
+  // visible in the stamps alone, with no id to break a tie.
+  assert.deepEqual(events.map((event) => event.at), [now, now + 1, now + 2]);
+  assert.ok(events[1].at > events[0].at && events[2].at > events[1].at);
+  assert.deepEqual(verifyChain(events), { ok: true, brokenAt: null });
+
+  const counters = (result) => result.pairs.find((pair) => pair.observer === "s1" && pair.target === "s1").counters;
+  const derived = deriveRelationships({ events, roomId: "r1" });
+  assert.equal(counters(derived).blockedReports, 1);
+  assert.equal(counters(derived).blockedConfirmed, 1);
+  // The count is a function of `(tick, at)` alone: the same envelopes handed
+  // over in the opposite array order derive identically, so no id and no input
+  // order can decide whether the resume retires the report.
+  assert.deepEqual(deriveRelationships({ events: [...events].reverse(), roomId: "r1" }), derived);
+});
+
+test("an explicit at is honoured verbatim and never lets the room's guard go backwards", async () => {
+  const { log } = await temporaryLog();
+  const stated = await log.append("r1", { type: "a", actor: { kind: "system", id: "system" },
+    payload: {}, provenance: { roomId: "r1" }, at: 5_000 });
+  assert.equal(stated.at, 5_000, "a caller's explicit stamp is not rewritten");
+  // The wall clock is far behind the stamp already on disk. The guard keeps the
+  // next append strictly after the line that is really there.
+  const next = await withFrozenClock(1_000, () => log.append("r1", { type: "b",
+    actor: { kind: "system", id: "system" }, payload: {}, provenance: { roomId: "r1" } }));
+  assert.equal(next.at, 5_001);
+  assert.deepEqual(verifyChain(await log.read("r1")), { ok: true, brokenAt: null });
+});
+
+test("a cold cache seeds the at guard from the log it already reads", async () => {
+  const { directory, log } = await temporaryLog();
+  const first = await log.append("r1", { type: "a", actor: { kind: "system", id: "system" },
+    payload: {}, provenance: { roomId: "r1" }, at: 7_000 });
+  // A fresh instance is the restart case: the head cache is cold, so `append`
+  // parses the log once. The guard is seeded from that same parse — no second
+  // read — and the clock has gone backwards since the line was written.
+  const reopened = new EventLog(join(directory, "rooms.json"));
+  const second = await withFrozenClock(1_000, () => reopened.append("r1", { type: "b",
+    actor: { kind: "system", id: "system" }, payload: {}, provenance: { roomId: "r1" } }));
+  assert.equal(second.prev, first.hash);
+  assert.equal(second.at, 7_001);
+  assert.deepEqual((await reopened.read("r1")).map((event) => event.at), [7_000, 7_001]);
+  assert.deepEqual(verifyChain(await reopened.read("r1")), { ok: true, brokenAt: null });
+});
+
+test("priming seeds the at guard from the same parse as the head", async () => {
+  const { directory, log } = await temporaryLog();
+  await log.append("r1", { type: "a", actor: { kind: "system", id: "system" },
+    payload: {}, provenance: { roomId: "r1" }, at: 4_000 });
+  // Warming is what keeps the first append after a restart off the room's log;
+  // the guard is warmed from that same parse, so it needs no read of its own.
+  const reopened = new EventLog(join(directory, "rooms.json"));
+  await reopened.prime(["r1"]);
+  const appended = await withFrozenClock(1_000, () => reopened.append("r1", { type: "b",
+    actor: { kind: "system", id: "system" }, payload: {}, provenance: { roomId: "r1" } }));
+  assert.equal(appended.at, 4_001);
+});
+
+test("replace resets the at guard and preserves every rewritten stamp", async () => {
+  const { log } = await temporaryLog();
+  // A far-future stamp, so a guard left over from before the restore is
+  // unmistakable: it would push the next append past it instead of following
+  // the restored log.
+  await log.append("r1", { type: "a", actor: { kind: "system", id: "system" },
+    payload: {}, provenance: { roomId: "r1" }, at: 9_000_000_000_000 });
+  const first = createEvent({ type: "restored.1", actor: { kind: "system", id: "system" }, payload: {}, at: 1_500 });
+  const second = createEvent({ type: "restored.2", actor: { kind: "system", id: "system" }, payload: {},
+    at: 1_700, prev: first.hash });
+  await log.replace("r1", [first, second]);
+  const appended = await withFrozenClock(2_000, () => log.append("r1", { type: "after",
+    actor: { kind: "system", id: "system" }, payload: {}, provenance: { roomId: "r1" } }));
+  assert.equal(appended.at, 2_000, "the guard restarts from the restored log, not from the replaced one");
+  const events = await log.read("r1");
+  // `replace` rewrites the events as they were: their own stamps are untouched.
+  assert.deepEqual(events.map((event) => event.at), [1_500, 1_700, 2_000]);
+  assert.deepEqual(events.map((event) => event.type), ["restored.1", "restored.2", "after"]);
+  assert.equal(events[0].hash, first.hash);
+  assert.deepEqual(verifyChain(events), { ok: true, brokenAt: null });
 });
 
 test("drain waits for appends no caller awaited", async () => {
