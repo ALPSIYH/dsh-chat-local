@@ -1,10 +1,27 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { execFile, execFileSync } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createEvent, hashEvent, serializeEvent, verifyChain, EVENT_LOG_VERSION, EventLog } from "../lib/event-log.js";
 import { deriveRelationships } from "../lib/relationship.js";
+
+/**
+ * Run one module body in a child process, with a hard timeout. The timeout is
+ * the assertion: a blocked write never settles on its own, so a child that had
+ * to be killed is the only honest way to say "this would have waited forever"
+ * without leaving the test runner's own process wedged.
+ */
+async function runChild(script, timeoutMs) {
+  return await new Promise((resolve) => {
+    execFile(process.execPath, ["--input-type=module", "-e", script],
+      { encoding: "utf8", timeout: timeoutMs },
+      (error, stdout, stderr) => resolve({
+        code: error ? (error.code ?? -1) : 0, killed: error?.killed === true, stdout, stderr
+      }));
+  });
+}
 
 /** A log in its own temp directory, with the room log path the anchor sits beside. */
 async function temporaryLog() {
@@ -490,6 +507,47 @@ test("drain waits for appends no caller awaited", async () => {
   const events = await log.read("r1");
   assert.equal(events.length, 2);
   assert.deepEqual(verifyChain(events), { ok: true, brokenAt: null });
+});
+
+test("an append to a warm log swapped for a FIFO is refused rather than waiting", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "dcl-events-append-fifo-"));
+  try {
+    await mkdir(join(directory, "events"), { recursive: true });
+    const fifo = join(directory, "events", "r1.jsonl");
+    try { execFileSync("mkfifo", [fifo]); }
+    catch (error) { t.skip(`mkfifo is unavailable: ${String(error?.message ?? error)}`); return; }
+    await rm(fifo, { force: true });
+    // The FIFO is swapped in *after* the log is warm. A cold append routes
+    // through `#lastHashFor` -> `read`, which already refuses a non-regular file;
+    // the append-path hole is the warm one, where the cache is seeded and the
+    // write opens the path directly. Nothing ever reads the pipe, so an
+    // unguarded `appendFile` blocks at open — and the blocked per-room tail
+    // holds `drain()`, and so every read of that room and `close()`, while a
+    // bare process does not exit.
+    const module = new URL("../lib/event-log.js", import.meta.url).href;
+    const child = await runChild(`
+      import { EventLog } from ${JSON.stringify(module)};
+      import { rmSync } from "node:fs";
+      import { execFileSync } from "node:child_process";
+      const log = new EventLog(${JSON.stringify(join(directory, "rooms.json"))});
+      const warm = await log.append("r1", { type: "message.created", payload: {} });
+      rmSync(${JSON.stringify(fifo)});
+      execFileSync("mkfifo", [${JSON.stringify(fifo)}]);
+      const written = await log.append("r1", { type: "message.created", payload: {} });
+      console.log(JSON.stringify({ warm: warm !== null, written, health: log.health() }));
+    `, 5_000);
+    assert.equal(child.killed, false, "the append must refuse the FIFO, not wait on it");
+    assert.equal(child.code, 0, child.stderr);
+    const answer = JSON.parse(child.stdout);
+    assert.equal(answer.warm, true, "the fixture must have written a real log first");
+    // A refused append is dropped and counted, which is the writer's documented
+    // degradation: the room operation it observed still succeeds.
+    assert.equal(answer.written, null);
+    assert.equal(answer.health.failed, 1);
+    assert.equal(answer.health.droppedCount, 1);
+    assert.match(answer.health.lastError, /not a regular file/u);
+    assert.ok(!answer.health.lastError.includes(directory), "no absolute path in the health shape");
+  } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
 test("a log path that is not a regular file is refused rather than read", async () => {
