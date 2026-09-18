@@ -1,9 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Readable } from "node:stream";
 import { DshChatLocalService } from "../lib/room-store.js";
+import { apply } from "../lib/index.js";
 
 /**
  * The gate's wiring into the tool guard: what the guard does with a judgement,
@@ -47,7 +49,14 @@ async function harness() {
     members: [{ kind: "session", sessionId: "s1", alias: "甲" }] });
   const state = () => service.state.rooms.find((item) => item.id === room.id);
   return {
-    service, room, calls,
+    service, room, calls, ctx, path: join(directory, "rooms.json"),
+    saved: async () => JSON.parse(await readFile(join(directory, "rooms.json"), "utf8")),
+    /** Reopen the same state file with a fresh service, as a restart would. */
+    reopen: async () => {
+      const next = new DshChatLocalService(ctx, { path: join(directory, "rooms.json"), replyTimeoutMs: 5_000 });
+      await next.ready;
+      return next;
+    },
     setFailing: (value) => { failing = value; },
     /** The room's live policy. The gate flag is read from here on every execution. */
     enableGate: () => { state().policy.gate = true; },
@@ -176,5 +185,111 @@ test("a stale or ambiguous lock still returns before the gate is consulted", asy
     assert.equal((await h.events()).length, before, "a lock the gate never reached records nothing");
   } finally {
     await h.close();
+  }
+});
+
+test("a gate survives a later change to an unrelated policy field, across a restart", async () => {
+  const h = await harness();
+  try {
+    // An execution mode first: that is the only place the gate has any effect.
+    await h.service.setRoomPolicy(h.room.id, { defaultActionMode: "inherit_dsh", expectedRevision: 1, confirmRisk: true });
+    const on = await h.service.setRoomPolicy(h.room.id, { defaultActionMode: "inherit_dsh",
+      expectedRevision: 2, confirmRisk: true, gate: true });
+    assert.equal(on.policy.gate, true);
+    assert.equal((await h.saved()).rooms[0].policy.gate, true, "the flag reaches the state file");
+    // Rebuilding the policy must carry the extra field: a mode change is not a
+    // reason to forget what else the user chose.
+    const moved = await h.service.setRoomPolicy(h.room.id, { defaultActionMode: "read_only_audit",
+      expectedRevision: on.policy.revision });
+    assert.equal(moved.policy.defaultActionMode, "read_only_audit");
+    assert.equal(moved.policy.gate, true);
+    assert.equal((await h.saved()).rooms[0].policy.gate, true);
+    const reopened = await h.reopen();
+    try {
+      assert.equal((await reopened.resolveRoom(h.room.id)).policy.gate, true, "and it survives a reload");
+    } finally { await reopened.close(); }
+  } finally {
+    await h.close();
+  }
+});
+
+test("a call that changes only the gate takes effect, and a call that changes nothing does not", async () => {
+  const h = await harness();
+  try {
+    const before = await h.service.resolveRoom(h.room.id);
+    const on = await h.service.setRoomPolicy(h.room.id, { defaultActionMode: before.policy.defaultActionMode,
+      expectedRevision: before.policy.revision, gate: true });
+    assert.equal(on.policy.gate, true, "the mode is unchanged, so only the gate can have changed");
+    assert.equal(on.policy.revision, before.policy.revision + 1, "a real change bumps the policy revision");
+    const again = await h.service.setRoomPolicy(h.room.id, { defaultActionMode: on.policy.defaultActionMode,
+      expectedRevision: on.policy.revision, gate: true });
+    assert.equal(again.policy.revision, on.policy.revision, "asking for what already holds changes nothing");
+    const off = await h.service.setRoomPolicy(h.room.id, { defaultActionMode: again.policy.defaultActionMode,
+      expectedRevision: again.policy.revision, gate: false });
+    assert.equal(off.policy.gate, undefined);
+    assert.equal(off.policy.revision, again.policy.revision + 1);
+  } finally {
+    await h.close();
+  }
+});
+
+test("a room that has never enabled the gate stores exactly the policy shape it stored before", async () => {
+  const h = await harness();
+  try {
+    assert.deepEqual(Object.keys((await h.saved()).rooms[0].policy),
+      ["revision", "defaultActionMode", "updatedAt"]);
+    const before = await h.service.resolveRoom(h.room.id);
+    await h.service.setRoomPolicy(h.room.id, { defaultActionMode: before.policy.defaultActionMode,
+      expectedRevision: before.policy.revision, gate: true });
+    assert.deepEqual(Object.keys((await h.saved()).rooms[0].policy),
+      ["revision", "defaultActionMode", "gate", "updatedAt"]);
+    const on = await h.service.resolveRoom(h.room.id);
+    await h.service.setRoomPolicy(h.room.id, { defaultActionMode: on.policy.defaultActionMode,
+      expectedRevision: on.policy.revision, gate: false });
+    assert.deepEqual(Object.keys((await h.saved()).rooms[0].policy),
+      ["revision", "defaultActionMode", "updatedAt"], "turning it off leaves no trace of the field");
+  } finally {
+    await h.close();
+  }
+});
+
+test("the policy endpoint carries the gate switch and tells the room about it", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "dcl-gate-route-"));
+  let handler;
+  const disposers = [];
+  const ctx = {
+    effect(fn) { const dispose = fn(); if (typeof dispose === "function") disposers.push(dispose); },
+    on() {},
+    tools: { register() {}, guard() {} },
+    webServer: { register(route) { handler = route.handler; } },
+    sessionTitle: { get() {} },
+    sessions: { get() { return { header: { cwd: directory } }; } },
+    agents: { get() {} },
+    dshBridge: { status: async () => ({ state: "idle" }), deliverExternal: async () => {} },
+    get(name) { return this[name]; }
+  };
+  apply(ctx, { path: join(directory, "rooms.json") });
+  const request = async (path, body, method) => {
+    const req = Readable.from(body === undefined ? [] : [Buffer.from(JSON.stringify(body))]);
+    req.url = `/api/dsh-chat-local${path}`;
+    req.method = method ?? (body === undefined ? "GET" : "POST");
+    let status, text;
+    await handler(req, { writeHead(code) { status = code; }, end(value) { text = value; } });
+    assert.equal(status, 200, text);
+    return JSON.parse(text).value;
+  };
+  try {
+    const room = await request("/rooms", { name: "治理门路由", autoDeliver: false });
+    const updated = await request(`/rooms/${room.id}/policy`, { defaultActionMode: room.policy.defaultActionMode,
+      expectedRevision: room.policy.revision, gate: true });
+    assert.equal(updated.policy.gate, true);
+    // The room is told, in its own timeline, so a member that later meets a
+    // refusal can see that the room's governance was turned on.
+    const messages = await request(`/rooms/${room.id}/messages`);
+    assert.ok(messages.some((message) => message.author === "system:policy" && message.text.includes("治理门")),
+      "the change is announced in the room");
+  } finally {
+    for (const dispose of disposers.reverse()) await dispose();
+    await rm(directory, { recursive: true, force: true });
   }
 });

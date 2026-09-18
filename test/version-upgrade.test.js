@@ -35,6 +35,34 @@ test("retention never silently deletes messages beyond the former 2000 message c
   finally { await reopened.close(); }
 }));
 
+test("a state file from the version before the gate keeps a byte-identical backup", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "dcl-upgrade-gate-"));
+  const path = join(directory, "rooms.json");
+  const service = new DshChatLocalService({}, { path });
+  const room = await service.createRoom({ name: "升级", autoDeliver: false });
+  await service.close();
+  // The file the previous version would have written, gate included: a policy
+  // field is data, so the older format carries it as one.
+  const legacy = JSON.parse(await readFile(path, "utf8"));
+  legacy.version = 15;
+  legacy.rooms[0].policy.gate = true;
+  const bytes = JSON.stringify(legacy);
+  await writeFile(path, bytes);
+  const next = new DshChatLocalService({}, { path });
+  try {
+    await next.ready;
+    assert.equal(await readFile(`${path}.v15.bak`, "utf8"), bytes, "the pre-migration bytes are kept verbatim");
+    assert.equal(next.stateVersion(), 16);
+    assert.equal((await next.resolveRoom(room.id)).policy.gate, true, "the switch survives the migration");
+    const saved = JSON.parse(await readFile(path, "utf8"));
+    assert.equal(saved.version, 16);
+    assert.equal(saved.rooms[0].policy.gate, true);
+  } finally {
+    await next.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("restart exposes interrupted work without pretending to resume it", () => fixture(async ({service,path}) => {
   const room=await service.createRoom({name:"重启",autoDeliver:false}); await service.close();
   const state=JSON.parse(await readFile(path,"utf8"));
