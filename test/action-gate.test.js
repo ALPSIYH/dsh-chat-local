@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -49,6 +49,11 @@ async function harness(roomName = "行动治理门") {
   const room = await service.createRoom({ name: roomName, autoDeliver: true,
     members: [{ kind: "session", sessionId: "s1", alias: "甲" }] });
   const state = () => service.state.rooms.find((item) => item.id === room.id);
+  async function openTurn(call) {
+    await service.observeSessionEvent(call.to, { type: "turn/start", data: { turn: 1 } });
+    await service.observeSessionEvent(call.to, { type: "user/message", data: { content: [{ type: "text",
+      text: `[dsh-bridge dsh-chat-local-room message ${call.delivery.id} from room:${room.id}]` }] } });
+  }
   return {
     service, room, calls, ctx, directory, path: join(directory, "rooms.json"),
     saved: async () => JSON.parse(await readFile(join(directory, "rooms.json"), "utf8")),
@@ -64,13 +69,17 @@ async function harness(roomName = "行动治理门") {
     setSample: (pairs) => { service.relationshipSamples.set(room.id, { asOfTick: state().tick, version: 1,
       derivedFromCount: 0, pairs }); },
     events: () => service.eventsFor(room.id),
+    /**
+     * Wait until the log holds every event this service already owes. A turn's
+     * deliveries are recorded asynchronously, so a read straight after
+     * `openTurn` can legitimately see a log that has not yet caught up with the
+     * writes the turn already started; the exact comparisons below are only
+     * meaningful once those writes have settled.
+     */
+    settle: () => service.settledAudit(),
     idle: async () => (await service.resolveRoom(room.id)).orchestration?.state === "idle",
     /** Open a member's turn the way DSH reports it, and leave it open. */
-    openTurn: async (call) => {
-      await service.observeSessionEvent(call.to, { type: "turn/start", data: { turn: 1 } });
-      await service.observeSessionEvent(call.to, { type: "user/message", data: { content: [{ type: "text",
-        text: `[dsh-bridge dsh-chat-local-room message ${call.delivery.id} from room:${room.id}]` }] } });
-    },
+    openTurn,
     close: async () => { await service.close(); await rm(directory, { recursive: true, force: true }); }
   };
 }
@@ -107,6 +116,10 @@ const UUID = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g;
 /**
  * One execution-mode turn in a room whose only member could not be reached on
  * the previous turn: the record the gate reads, with the room otherwise fresh.
+ *
+ * Returns with the second delivery's turn open. That is not yet a stable read
+ * point for the log — the turn's own writes are still in flight — so a caller
+ * that intends to compare event sequences waits with `h.settle()` first.
  */
 async function gatedTurn() {
   const h = await harness("关闭对照");
@@ -119,6 +132,14 @@ async function gatedTurn() {
   h.setFailing(false);
   await h.service.send({ roomId: h.room.id, author: "human:me", authorKind: "human", text: "第二轮" });
   const call = await waitFor(() => h.calls.at(-1), "the second delivery");
+  // The delivery loop records `delivery.sent` for the queued delivery it just
+  // handed to the bridge, and only then does the member's turn arrive. Waiting
+  // for that record keeps the two recorded in the order they happened: opening
+  // the turn first lets the delivery reach `delivered` while the `sent`
+  // transition is still waiting for its save, and a transition the room has
+  // already left behind is not what its log states.
+  await waitFor(async () => (await h.events()).some((event) => event.type === "delivery.sent"
+    && event.payload.deliveryId === call.delivery.id), "the delivery to be recorded as sent");
   await h.openTurn(call);
   return { h, lock: h.service.policyLocks.get("s1") };
 }
@@ -376,6 +397,10 @@ test("with the gate off, a whole turn behaves exactly as it did before the gate 
   try {
     // 1. Tool execution outcome, refusal text included.
     assert.deepEqual(runCases(h, lock), PRE_GATE_OUTCOMES);
+    // The turn's deliveries are recorded without their caller awaiting them, so
+    // the log has to be read once its writes have settled. This waits for the
+    // work already issued; it does not wait for, or start, anything new.
+    await h.settle();
     const events = await h.events();
     // 2. The emitted event sequence.
     assert.deepEqual(events.map((event) => event.type), PRE_GATE_EVENT_TYPES);
@@ -395,6 +420,63 @@ test("with the gate off, a whole turn behaves exactly as it did before the gate 
   }
 });
 
+/**
+ * The same scenario, repeated with the state directory under concurrent write
+ * load. The lock above reads the log immediately after a turn opens, which is
+ * exactly the window in which the turn's last delivery event is still queued
+ * behind its save; without waiting for that save the read can win the race and
+ * report a sequence that is one event short. Each round here asserts the same
+ * exact sequence the lock does, so a round that skipped the wait would fail
+ * intermittently rather than quietly compare a shorter list.
+ */
+test("the gate-off turn holds its exact recorded sequence across repeated loaded runs", async () => {
+  const ROUNDS = 16;
+  const sequences = new Set();
+  for (let round = 1; round <= ROUNDS; round += 1) {
+    const { h, lock } = await gatedTurn();
+    // A burst of independent writes into the same directory: they contend with
+    // the turn's own save and append, which is what made the read race real.
+    let noise;
+    try {
+      noise = Array.from({ length: 24 }, (_, index) =>
+        writeFile(join(h.directory, `noise-${round}-${index}.tmp`), "x".repeat(8_192)));
+      assert.deepEqual(runCases(h, lock), PRE_GATE_OUTCOMES, `round ${round}: the guard's decisions`);
+      await h.settle();
+      await Promise.all(noise);
+      const events = await h.events();
+      const types = events.map((event) => event.type);
+      assert.deepEqual(types, PRE_GATE_EVENT_TYPES, `round ${round}: the emitted event sequence`);
+      const prompts = events.filter((event) => event.type === "turn.prompt").map((event) => event.payload);
+      assert.deepEqual(prompts.map((payload) => payload.promptChars),
+        PRE_GATE_PROMPTS.map((expected) => expected.chars), `round ${round}: the prompt sizes`);
+      for (const [index, payload] of prompts.entries()) {
+        const normalized = payload.prompt.replace(UUID, "{id}");
+        assert.equal(createHash("sha256").update(normalized).digest("hex"),
+          PRE_GATE_PROMPTS[index].sha256, `round ${round}: prompt ${index + 1}`);
+      }
+      sequences.add(types.join(","));
+    } finally {
+      await Promise.allSettled(noise ?? []);
+      await h.close();
+    }
+  }
+  assert.equal(sequences.size, 1, "every round must record the same sequence, not merely a passing one");
+  assert.deepEqual([...sequences], [PRE_GATE_EVENT_TYPES.join(",")]);
+});
+
+/**
+ * The ordering the lock above depends on, pinned on its own.
+ *
+ * `delivery.sent` is written for the delivery a `queued` member has just been
+ * handed, and only a save that still finds the delivery in that status records
+ * it. When the member's turn arrives before that save has run, the delivery has
+ * already moved on to `delivered`, and the room states the transition it now
+ * holds rather than one it has left. That is not a claim about the gate — it is
+ * what the delivery path did before the gate existed — but it is why the lock
+ * has to reach its read point in the room's order instead of at whatever moment
+ * a reader happens to arrive, and it is the state the gate's counters are read
+ * from, so it is worth holding still.
+ */
 test("turning the gate on only adds refusals, and never rewrites one that already held", async () => {
   const { h, lock } = await gatedTurn();
   try {

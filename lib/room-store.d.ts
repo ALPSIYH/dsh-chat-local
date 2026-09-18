@@ -31,6 +31,7 @@ export declare class DshChatLocalService {
   searchMessages(roomId: string, input?: any): Promise<any[]>;
   relationships(roomId: string): Promise<Record<string, Record<string, any>>>;
   relationshipRow(roomId: string, sessionId: string): Promise<any>;
+  quiesce(): Promise<{ appended: number; failed: number; lastError: any; droppedCount: number; dropped: any[] }>;
   eventsFor(roomId: string): Promise<any[]>;
   logHealth(): { appended: number; failed: number; lastError: any; droppedCount: number; dropped: any[] };
   stateVersion(): number;
