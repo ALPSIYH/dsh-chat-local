@@ -54,7 +54,7 @@
 **一条必须同时做的设计（否则"印象影响互动"测不出来）**：光把印象注入提示词不算影响互动，必须有**行动层的钩子**。例如：
 
 - 注入钩子：回合提示词里给「你与被征询者的关系摘要」（低信任 → 明确要求核验）。
-- 行动钩子：**治理门** —— 对低信任对象的**高影响动作**（如 `full_access` 回合的写操作、把任务交给从未成功交付过的人）要求额外确认或强制独立验收。
+- 行动钩子：**治理门**。设计初稿写的是「对**低信任对象**的高影响动作」，实现改为读**行动成员自己**那一对记录：一次工具执行不指名对手方，「对象」只能是行动者本人，规则因此读作「房间现在能不能可靠地让这个成员做这件事」（`lib/gate.js` 的 `evaluateGate`，行为见 README「行动治理门」一节）。判定为：高影响动作在「发给他的投递失败过、从未成功送达」时要求额外确认；可能是评审的动作（含映射表未登记的工具）在他名下还有未闭环分歧时要求独立验收。
 - 只有注入钩子时，观测到的是措辞差异；加上行动钩子后，观测到的是**可测量的行为差异**（动作被拒次数、验收通过率、接手人选择分布）。
 
 ---
@@ -96,15 +96,18 @@ appraisal(id, event_id, observer_id, about_agent_id, at,
       valid_from, valid_to)              # 撤销而非删除
 
 # 治理门：印象影响行动的地方（可记录、可审计）
-action_gate(id, at, actor_id, target_id, action_type, risk_class,
-      decision ∈ {allow, require_confirmation, require_independent_review, deny},
-      basis_snapshot_id, applied_by)     # applied_by ∈ {policy, model, human}
+action_gate(id, at, actor_id, tool, judgement, risk_class, action,
+      basis{observer, target, as_of_tick, version, derived_from_count, counters})
+      # 初稿这里是 target_id / action_type / decision / basis_snapshot_id /
+      # applied_by，实现改成了上面这一行：actor_id 就是被判定的行动成员，
+      # observer == target == actor_id；只在判定为拒绝时追加（allow 不写事件）；
+      # 没有 applied_by —— 门一律由房间策略作出，不存在「模型决定的门」。
 ```
 
 设计要点：
 - **`relationship_snapshot` 只追加**：印象随时间的历史本身是研究对象（"信任何时转折"）。
 - **`appraisal` 带 `valid_from/valid_to`**：撤销而非删除（TEPA：按键撤销 0.950 vs append-only/LWW 0.210 < 无记忆 0.309）。
-- **`action_gate.applied_by`** 区分"是策略决定的还是模型决定的"——否则无法归因。
+- **门的作者身份。** 初稿用 `action_gate.applied_by` 区分「策略决定」与「模型决定」。实现里没有这个字段：治理门一律由房间策略作出，判定只读房间自己记录下来的计数器快照，模型没有声明一个门的入口（实验干预/manifest 端点上的 `appliedBy: "human"` 是另一件事，与门无关），所以这一维不存在需要归因的歧义。
 - **印象的键**：先定"什么是同一件事"（对手方 × 能力维度？还是单一标量？）。TEPA 的教训是**键的设计比失效策略更早决定成败**。
 
 ---
@@ -138,13 +141,13 @@ action_gate(id, at, actor_id, target_id, action_type, risk_class,
 
 | # | 原问题 | 决定 | 理由 |
 |---|---|---|---|
-| 1 | 印象私有还是公开 | **私有为默认**。`review.verdict` 这类**本来就已经是公开动作**的进入共享声誉；其余 appraisal 只对观察者本人可见 | AgentLeak：agent 间消息泄漏 **68.8%** vs 最终输出 27.2%，只看输出的审计漏掉 **41.7%**；MAP-Graph：摘要会掩盖 private/poisoned/revoked 来源。且插件语义上 review 本就是公开动作 |
+| 1 | 印象私有还是公开 | **对 Agent 侧私有**。`review.verdict` 这类**本来就已经是公开动作**的进入共享声誉；其余 appraisal 只进入观察者本人的那一行——`chat_relationships` 只返回调用者自己的一行，成员看不到别人的判断。房间主人的只读端点 `GET /rooms/:id/appraisals` 返回**完整矩阵**，它与插件其它端点一样挂在本地回环、不认证调用者（README 已披露），所以「私有」是相对于 Agent 工具而言，不是对任何能访问回环的本地进程保密 | AgentLeak：agent 间消息泄漏 **68.8%** vs 最终输出 27.2%，只看输出的审计漏掉 **41.7%**；MAP-Graph：摘要会掩盖 private/poisoned/revoked 来源。且插件语义上 review 本就是公开动作 |
 | 2 | 关系粒度 | **二元 `(observer, target)` 为准**；群体印象只作为 C 层的**聚合视图**，不单独存模型 appraisal | Concordia 只有二元先例；群体 appraisal 无法归因到具体证据 |
 | 3 | 印象是否影响调度 | **第一版不影响。** 印象只经治理门影响"动作是否被允许 / 需额外确认 / 需独立验收" | 回合顺序是目前**唯一已经做对**的可复现性要素（按成员配置序、单轮不并发）。动它就要额外记录并重做验证 —— 单独开一个决策 |
-| 4 | 人类可否设置/清零 | **必须可。** 显式 API + 审计记录 `applied_by: human` | 研究需要"每局重置臂"；不可重置就无法做反事实 |
-| 5 | 探索配额 | **加最小版本**：低信任目标仍按配额获得任务，配额与探索记录落盘，可关闭 | 否则"低信任者永远拿不到任务 → 永远无法改善"的自我实现循环会污染结论 |
+| 4 | 人类可否设置/清零 | **必须可。** 显式 API + 审计记录 `appliedBy: "human"`（事件里写在 `payload.appliedBy`） | 研究需要"每局重置臂"；不可重置就无法做反事实 |
+| 5 | 探索配额 | **未实现，也尚未决定。** 建议的「加最小版本」（低信任目标仍按配额获得任务，配额与探索记录落盘、可关闭）没有落进任何一处代码：当前实现没有配额、没有探索记录，也没有对应的事件或配置项 | 提议的理由仍是待解的取舍（低信任者永远拿不到任务 → 永远无法改善）；在实现之前，本文不把它当作已决定的行为 |
 
-**仍属真正取舍的**：#3 与 #5 标记为「第一版默认、需要时单独决策」。其余三项是架构级承诺，改动等于换方案。
+**仍属真正取舍的**：#3 标记为「第一版默认、需要时单独决策」；#5 尚未实现，也尚未决定。其余三项是架构级承诺，改动等于换方案。
 
 ---
 
