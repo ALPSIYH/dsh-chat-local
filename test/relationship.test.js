@@ -947,8 +947,11 @@ test("the tool selects the caller's own row, not the first observer's", async ()
     assert.deepEqual(await tool.execute({ room: room.id }, exec("s1")), { observer: "s1", targets: {
       s1: { ...ALL_ZERO, messagesAuthored: 11 }, s2: { ...ALL_ZERO, messagesAuthored: 12 } } });
   } finally {
-    if (plugin) await plugin.close();
+    // Restored before the close, not after: a rejecting `close()` would
+    // otherwise leave this stub on the prototype for every later test in the
+    // file to inherit.
     DshChatLocalService.prototype.relationships = project;
+    if (plugin) await plugin.close();
   }
 });
 
