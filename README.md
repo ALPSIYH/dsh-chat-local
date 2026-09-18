@@ -167,7 +167,7 @@ dsh plugin --profile web add link:/path/to/dsh-chat-local
 
 事件记录**干预之前的 counters**（`countersBefore`，按对象），否则「重置了什么」不可复核。`clear` 是重置而不是删除：日志里全部既有事件与既有快照逐字节保留，投影只是从这条事件起读到新的计数。
 
-这个端点**不注册为任何 `chat_*` 工具**，并要求调用方明确声明 `appliedBy: "human"`，同时在**房间内有成员正处于群聊回合中时一律以 403 拒绝**。拒绝「回合中的调用」正是关键：Agent 只在自己的回合里行动，所以它无法在自己回合内清掉自己的计数——那等于同时改写实验的自变量与因变量，事后无法修复。非法的输入一律带原因拒绝（未知 `action`、缺 `mechanism`、非本房间成员、越界或未知的计数器名、`clear` 带 `counters`、未知字段），不静默忽略。它挂在与其他会改动状态的端点相同的本地回环表面上：跨站浏览器请求会被拒，但本机上已经能执行命令的进程不受它约束——与策略端点同一口径，真正的成员隔离仍须由 DSH 原生沙箱与审批提供。
+这个端点**不注册为任何 `chat_*` 工具**，并要求调用方明确声明 `appliedBy: "human"`，同时在**房间内有成员正处于群聊回合中时一律以 403 拒绝**。这条守卫的强度就是「回合进行中不受理任何实验变更」：一个 Agent 无法在**自己的回合内**顺手清掉自己的计数——那等于同时改写实验的自变量与因变量，事后无法修复。它是一段**时间窗**，不是身份验证：`appliedBy: "human"` 只是调用方的声明，端点也不认证调用者，所以一个在回合里启动、等回合结束后才调用本端点的脱离进程不受它约束——那属于下面那条回环限制，不在守卫的射程内。非法的输入一律带原因拒绝（未知 `action`、缺 `mechanism`、非本房间成员、越界或未知的计数器名、`clear` 带 `counters`、未知字段），不静默忽略。它挂在与其他会改动状态的端点相同的本地回环表面上：跨站浏览器请求会被拒，但本机上已经能执行命令的进程不受它约束——与策略端点同一口径，真正的成员隔离仍须由 DSH 原生沙箱与审批提供。
 
 **run manifest。** `POST /api/dsh-chat-local/rooms/:id/run-manifest`，请求体 `{arm: "persistent"|"reset_per_episode", appliedBy: "human"}`，写入一条 `run.manifest` 事件：`{configHash, models, initialStateVersion, startedAtTick, arm}`。它同样**不注册为工具**，并共用上面那一套守卫与拒绝规则（`appliedBy` 与「回合中拒绝」）。`models` 记录**运行时实际报告的** provider/model，读不到就记 `null`：这个 harness 的 `subagent` 工具没有 model 参数，而成员实际使用的模型是可以在成员端点上改的（`POST /api/dsh-chat-local/rooms/:id/members/:sessionId/model`，走 `selectMemberModel`，把 provider/model 写进该成员原生会话的配置），所以 manifest 里的模型名必须来自运行时、不能由调用方声明——否则记下的是调用方的说法，而不是真的在跑的那个模型。因此 `run-manifest` 不接受调用方提供的 `models`（出现即 400 拒绝）。
 
