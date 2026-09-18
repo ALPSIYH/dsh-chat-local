@@ -39,3 +39,49 @@ test("busy native sessions prevent partial room-wide escalation",async()=>{
     assert.equal(h.changed.length,0);assert.equal((await h.service.resolveRoom(h.room.id)).policy.defaultActionMode,"discuss_only");
   }finally{await h.cleanup();}
 });
+
+/**
+ * The risk confirmation belongs to naming an execution mode, and it did so
+ * before this call could move anything but a mode. Enabling or disabling the
+ * gate of a mode the user has already confirmed is the one call that moves no
+ * permission, so it is the one call that takes no confirmation. Every other
+ * call is decided exactly as it was: a mode that is merely re-sent, with no
+ * change at all, still returns without confirmation, while any call that names
+ * an execution mode and moves it still refuses without one.
+ */
+test("a mode that only moves the gate takes no risk confirmation, and every other call is decided as before",async()=>{
+  const h=await harness();try{
+    const settle=async(mode,confirmRisk)=>{const live=await h.service.resolveRoom(h.room.id);
+      return await h.service.setRoomPolicy(h.room.id,{defaultActionMode:mode,expectedRevision:live.policy.revision,confirmRisk});};
+    const rejects=async(mode)=>await assert.rejects(h.service.setRoomPolicy(h.room.id,{defaultActionMode:mode,
+      expectedRevision:(await h.service.resolveRoom(h.room.id)).policy.revision}),/explicit risk confirmation/);
+
+    // Naming an execution mode takes a confirmation; without one it refuses.
+    await rejects("inherit_dsh");
+    await settle("inherit_dsh",true);
+    // Re-sending the mode asks for what already holds: it changes nothing, so it
+    // needs no confirmation and performs no change.
+    const again=await settle("inherit_dsh");
+    assert.equal(again.policy.defaultActionMode,"inherit_dsh");
+    // The one exception. The mode is untouched, so the gate can be moved alone.
+    const gateOnly=await h.service.setRoomPolicy(h.room.id,{defaultActionMode:"inherit_dsh",
+      expectedRevision:again.policy.revision,gate:true});
+    assert.equal(gateOnly.policy.gate,true);
+    assert.equal(gateOnly.policy.defaultActionMode,"inherit_dsh");
+    assert.equal(gateOnly.policy.revision,again.policy.revision+1);
+    // Re-applying a native preset always needs a confirmation, even when the
+    // mode is the one already in force, because it rewrites the native sessions.
+    await rejects("full_access");
+    await rejects("workspace_write");
+    await assert.rejects(h.service.setRoomPolicy(h.room.id,{defaultActionMode:"full_access",
+      expectedRevision:(await h.service.resolveRoom(h.room.id)).policy.revision,confirmRisk:false}),/explicit risk confirmation/);
+    // A gate-only change does not become a way to move a mode without one: the
+    // call that also names a different execution mode still refuses.
+    await assert.rejects(h.service.setRoomPolicy(h.room.id,{defaultActionMode:"workspace_write",
+      expectedRevision:(await h.service.resolveRoom(h.room.id)).policy.revision,gate:false}),/explicit risk confirmation/);
+    // And a safe mode, which no execution preset covers, still moves freely.
+    const safe=await settle("discuss_only");
+    assert.equal(safe.policy.defaultActionMode,"discuss_only");
+    assert.equal(safe.policy.gate,true,"a mode change must not drop the gate");
+  }finally{await h.cleanup();}
+});
