@@ -27,6 +27,52 @@ async function waitFor(predicate, label = "condition") {
 }
 
 /**
+ * Watch the service's state-write tail while a restore runs, so a test can act
+ * inside the swap→bump window: the restored room object is live and its own
+ * state write is in flight, but `restoreFromSnapshot` has not registered the log
+ * replace yet. `afterSwap` runs on the tail assignment of the first save made
+ * after the swap — the restore's own save, after that save has claimed — and
+ * `atRestoreAwait` runs on the restore's `await this.saveTail` read instead, the
+ * second read of the tail after the swap. Whatever `atRestoreAwait` returns
+ * (when it returns one) is the promise the restore then waits on, which is how a
+ * test puts a save in the window without the restore also joining its write.
+ * Both hooks fire at most once, and the accessor is left installed: it shows the
+ * same values a plain property would.
+ */
+function watchRestoreWindow(service, previous, { afterSwap, atRestoreAwait } = {}) {
+  let internal = service.saveTail;
+  let tailReads = 0;
+  let wroteTail = false;
+  let awaited = false;
+  Object.defineProperty(service, "saveTail", {
+    configurable: true,
+    get() {
+      if (awaited || typeof atRestoreAwait !== "function" || service.state.rooms[0] === previous) return internal;
+      tailReads += 1;
+      if (tailReads < 2) return internal;
+      awaited = true;
+      const tail = internal;
+      const replacement = atRestoreAwait(service.state.rooms[0]);
+      return replacement === undefined ? tail : replacement;
+    },
+    set(value) {
+      internal = value;
+      if (wroteTail || service.state.rooms[0] === previous) return;
+      wroteTail = true;
+      afterSwap?.(service.state.rooms[0]);
+    }
+  });
+}
+
+/** The `message.created` envelope the queue builds for one message. */
+function messageCreated(message) {
+  return { type: "message.created", actor: { kind: message.authorKind, id: message.author },
+    payload: { messageId: message.id, roomSeq: message.roomSeq, text: message.text,
+      authorKind: message.authorKind, mentions: [], clientOperationId: null, correctsMessageId: null },
+    causes: [], provenance: { originClass: "system", sessionKind: "interactive", messageId: message.id } };
+}
+
+/**
  * A service whose single member delivers immediately but whose turn never ends
  * on its own, so a restore can be issued while the turn is genuinely in flight.
  */
@@ -295,3 +341,177 @@ test("a restore whose save fails leaves memory exactly as it was", async () => {
   assert.equal(await readFile(statePath, "utf8"), before);
   await service.close();
 });
+
+/**
+ * A restore installs the restored room and then replaces the log, and the window
+ * between the two spans a real state write and the join on it. A save can claim
+ * an audit inside that window, and such a save's snapshot *is* the durable state
+ * — it is written after the restore's own — so dropping its append leaves the log
+ * under-describing `rooms.json`. The entry belongs to the restored object, which
+ * is the live one, so the flush's central check keeps it; a guard keyed on the
+ * room id plus a counter cannot tell that object from the one it replaced and
+ * drops the append instead.
+ *
+ * The same claim also carries an entry for the discarded object. That one must
+ * never reach the restored log: it is the phantom direction of the same rule, and
+ * a check that only asks "is this room id still present" would let it through.
+ */
+test("a legitimate save claimed in a restore's swap→bump window is still audited", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "dcl-snap-window-"));
+  const service = await serviceAt(directory);
+  const room = await service.createRoom({ name: "窗口", autoDeliver: false,
+    members: [{ kind: "session", sessionId: "s1", alias: "甲" }] });
+  await service.send({ roomId: room.id, author: "human:me", authorKind: "human", text: "一" });
+  await service.setRoomDetails(room.id, { name: "窗口改", expectedRevision: (await service.resolveRoom(room.id)).revision });
+  const snapshot = JSON.parse((await service.snapshotRun(room.id, "cfg")).content);
+  const previous = service.state.rooms[0];
+  let notice;
+  let discarded;
+  watchRestoreWindow(service, previous, {
+    atRestoreAwait(live) {
+      // The change this save will write, with the event that explains it queued
+      // in the queue's own shape. It is built here rather than through a producer
+      // because every producer awaits `ready` before it queues, and only a claim
+      // made synchronously with this read lands before the bump.
+      live.roomSeq += 1;
+      notice = { id: crypto.randomUUID(), roomId: live.id, roomSeq: live.roomSeq, author: "system:probe",
+        authorKind: "system", authorAlias: "窗口", sentAt: Date.now(), actionMode: live.policy.defaultActionMode,
+        policyRevision: live.policy.revision, mentions: [], deliveries: [], text: "窗口内的持久变更" };
+      live.messages.push(notice);
+      discarded = { id: crypto.randomUUID() };
+      service.pendingAudit.push({ room: live, build: () => messageCreated(notice),
+        stillValid: () => live.messages.some((item) => item.id === notice.id) });
+      service.pendingAudit.push({ room: previous,
+        build: () => ({ type: "probe.discarded", actor: { kind: "system", id: "system:probe" },
+          payload: { id: discarded.id }, provenance: { originClass: "system", sessionKind: "interactive" } }),
+        stillValid: () => true });
+      // The workspace's own save callback claims synchronously; a public method
+      // would await `ready` first and claim after the bump instead.
+      void service.workspace.persist().catch(() => {});
+    }
+  });
+  await service.restoreFromSnapshot(snapshot, { confirm: true });
+  await service.settledAudit();
+  const onDisk = JSON.parse(await readFile(join(directory, "rooms.json"), "utf8")).rooms[0];
+  const events = await service.eventsFor(room.id);
+  assert.deepEqual(onDisk.messages.filter((message) => message.id === notice.id).map((message) => message.id),
+    [notice.id], "the window save's snapshot is the durable state");
+  assert.deepEqual(events.filter((event) => event.payload?.messageId === notice.id).map((event) => event.payload.messageId),
+    [notice.id], "a durable change with no audit event leaves the log under-describing rooms.json");
+  assert.deepEqual(events.filter((event) => event.type === "probe.discarded"), [],
+    "an entry for the room object this restore replaced reached the restored log");
+  assert.deepEqual(verifyChain(events), { ok: true, brokenAt: null });
+  await service.close();
+});
+
+/**
+ * The same window has a second edge. A save claimed after the swap belongs to the
+ * restored object, so the identity half of the flush's check passes — but the
+ * restore only joins that save's *write*, not its flush, so the flush can run
+ * before the restore registers the replace. An append registered first is then
+ * erased by the replace: the change is durable and the log has no event for it.
+ * A restore must therefore publish its replace at the swap, so a flush that could
+ * append to that room waits for it and lands after it.
+ */
+test("an audit append claimed for the restored room is ordered after the log replace", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "dcl-snap-order-"));
+  const service = await serviceAt(directory);
+  const room = await service.createRoom({ name: "次序", autoDeliver: false,
+    members: [{ kind: "session", sessionId: "s1", alias: "甲" }] });
+  await service.send({ roomId: room.id, author: "human:me", authorKind: "human", text: "一" });
+  await service.setRoomDetails(room.id, { name: "次序改", expectedRevision: (await service.resolveRoom(room.id)).revision });
+  const snapshot = JSON.parse((await service.snapshotRun(room.id, "cfg")).content);
+  const previous = service.state.rooms[0];
+  const order = [];
+  watchRestoreWindow(service, previous, {
+    afterSwap(live) {
+      // A real policy change, claimed inside the window. Its save chains behind
+      // the restore's own write, so the restore does join that write — and
+      // without the replace published at the swap this save's flush ends up
+      // appending before the replace registers, which erases it.
+      void service.setRoomPolicy(room.id, { defaultActionMode: "read_only_audit",
+        expectedRevision: live.policy.revision, gate: true }).catch(() => {});
+    }
+  });
+  const append = service.eventLog.append.bind(service.eventLog);
+  service.eventLog.append = (roomId, input) => {
+    order.push(`append:${input?.type}`);
+    return append(roomId, input);
+  };
+  const replace = service.eventLog.replace.bind(service.eventLog);
+  service.eventLog.replace = (roomId, events) => {
+    order.push("replace");
+    return replace(roomId, events);
+  };
+  await service.restoreFromSnapshot(snapshot, { confirm: true });
+  await service.settledAudit();
+  const onDisk = JSON.parse(await readFile(join(directory, "rooms.json"), "utf8")).rooms[0];
+  const events = await service.eventsFor(room.id);
+  assert.equal(onDisk.policy.gate, true, "the window save's policy change is the durable state");
+  assert.equal(events.filter((event) => event.type === "message.created"
+    && event.payload.authorKind === "system").length, 1,
+    "the durable policy change was appended after the log it belongs to was replaced");
+  // The ordering itself, not only its outcome: an append the log's writer
+  // received before the replace is one the replace erases.
+  assert.deepEqual(order, ["replace", "append:message.created"],
+    "the append was registered after the replace, so the replace cannot erase it");
+  assert.deepEqual(verifyChain(events), { ok: true, brokenAt: null });
+  await service.close();
+});
+
+/**
+ * A failed state write re-queues its claimed audits as raw entries, and a raw
+ * entry holds the room object it was queued against. If a restore lands before
+ * the next save, that save re-claims the entry after the swap — its `stillValid`
+ * only asks whether the discarded room still holds the message, which it does,
+ * because nothing mutates that detached object — and a guard keyed on the room
+ * id sees the same room and lets it through. The entry is then an orphan event in
+ * the restored log: a `message.created` for a message no restored state contains.
+ * Object identity refuses it, because the object it names is not the live room.
+ */
+test("a failed-write audit re-queued across a restore does not leak into the replaced log", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "dcl-snap-orphan-"));
+  const service = await serviceAt(directory);
+  const room = await service.createRoom({ name: "孤儿", autoDeliver: false,
+    members: [{ kind: "session", sessionId: "s1", alias: "甲" }] });
+  await service.send({ roomId: room.id, author: "human:me", authorKind: "human", text: "一" });
+  await service.setRoomDetails(room.id, { name: "孤儿改", expectedRevision: (await service.resolveRoom(room.id)).revision });
+  const snapshot = JSON.parse((await service.snapshotRun(room.id, "cfg")).content);
+  const previous = service.state.rooms[0];
+  // A state write that fails on a schedule: it claims the policy notice, and the
+  // failure lands once the restore's own save has already claimed — so the
+  // restore never sees the re-queued entry and a later save is the one that does.
+  let failWrite;
+  const held = new Promise((resolve, reject) => { failWrite = reject; });
+  let internal = held;
+  let fired = false;
+  Object.defineProperty(service, "saveTail", {
+    configurable: true,
+    get() { return internal; },
+    set(value) {
+      internal = value;
+      if (fired || service.state.rooms[0] === previous) return;
+      fired = true;
+      failWrite(new Error("simulated state write failure"));
+    }
+  });
+  const failing = service.setRoomPolicy(room.id, { defaultActionMode: "read_only_audit",
+    expectedRevision: previous.policy.revision, gate: true });
+  failing.catch(() => {});
+  // The failure is scheduled from the restore's own save, so the restore has to
+  // be running before it can happen: start it, then let the held write fail.
+  const restoring = service.restoreFromSnapshot(snapshot, { confirm: true });
+  await assert.rejects(() => failing, /simulated state write failure/);
+  await restoring;
+  // A save after the restore is what re-claims the re-queued raw entry.
+  await service.setRoomDetails(room.id, { name: "孤儿再改", expectedRevision: (await service.resolveRoom(room.id)).revision });
+  await service.settledAudit();
+  const events = await service.eventsFor(room.id);
+  const orphans = events.filter((event) => event.type === "message.created"
+    && event.payload.authorKind === "system");
+  assert.deepEqual(orphans, [], "a re-queued entry for the replaced room was appended into the restored log");
+  assert.deepEqual(events, snapshot.events, "the restored log is exactly the snapshot's log");
+  assert.deepEqual(verifyChain(events), { ok: true, brokenAt: null });
+  await service.close();
+});
+
