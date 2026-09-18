@@ -77,6 +77,44 @@ dsh plugin --profile web add link:/path/to/dsh-chat-local
 
 变更范围或负责人会清除旧的收悉/交付/验收并重新开放；归档不表示验收。每房间最多 1000 项台账、每项最多 1000 条历史事件，容量不足时拒绝新增而非截断历史。
 
+### 事件日志与关系派生
+
+除了 `rooms.json` 这份「当前状态」，每个对话还有一份**只追加的事件日志**：`~/.dsh/dsh-chat-local/events/<roomId>.jsonl`，一行一个事件，逐条用 SHA-256 串成链，同目录的 `<roomId>.head` 记录该房间最后一个事件的哈希（头部锚点）。日志不是读模型，而是「当时到底发生了什么」的审计记录：事件的正文一旦写入就不再修改或重写，房间被软删除或彻底移除也不会删掉它的日志。每个事件带版本号 `v`、`id`、`at`（epoch 毫秒）、`tick`、类型、`actor`、`payload`、`causes`、`provenance`、前一事件的 `prev` 与自身 `hash`。
+
+| 事件 | 记录的事实 |
+| --- | --- |
+| `message.created` | 一条消息进入房间：作者、序号、正文、来源会话、被纠正的消息 |
+| `delivery.sent` / `delivery.settled` | 一次投递发给谁、绑定哪条消息，以及它的最终状态（送达、失败、过期等） |
+| `turn.scheduled` | 一次回合的征询安排：配置顺序、实际执行顺序、轮转起点与当回合 tick |
+| `turn.prompt` | 交给某个成员的原样提示词：正文、字符数、SHA-256，以及对应的投递 id |
+| `ledger.transition` | 台账的一次状态变迁：事项 id 与 revision、动作、状态、负责人、验收人、验收结论、阻断状态、处置动作；章程提案另带提案人与被取代的提案 id |
+| `member.added` / `member.removed` | 谁在什么时候以什么别名和职责加入或离开房间 |
+
+事件的追加**跟随着状态落盘**：`message.created`、`ledger.transition`、`member.*` 都先进审计队列，由把对应状态写进磁盘的那次保存来 flush；那次保存失败，事件就留到下一次成功的保存，绝不会为一份没有落盘的 revision 或成员关系留下幻影记录。反过来，日志写入失败也不会让房间操作失败：它只计入健康计数，房间照常工作。
+
+**离线校验。** `node scripts/verify-event-log.mjs <roomId> [--state <rooms.json>]` 打开状态目录（或它的副本），逐条重算 SHA-256 链并核对头部锚点，只读、不写入；链断、被改写或尾部被截断时以非零状态码退出并打印具体位置。这个脚本校验的是**磁盘上的日志**；运行中的插件不校验在线日志，`verifyChain` 在生产路径上只用于导入快照时的事件链校验。
+
+**健康计数。** `GET /api/dsh-chat-local/health` 的 `audit` 字段给出审计层的当前状况：`appended`、`failed` 是累计计数，`lastError` 是最近一次失败（成功后清空，不会把一次瞬时故障永久挂住），`droppedCount` 与 `dropped[]` 列出最近若干条「本该有事件、但没能写进日志」的记录及其房间与事件类型。
+
+**快照与恢复。** `GET /api/dsh-chat-local/rooms/:id/snapshot?configHash=…` 导出一份 run 快照：房间读模型、该房间的完整事件日志与内容哈希。`POST /api/dsh-chat-local/rooms/:id/restore-from-snapshot` 需要 `{"snapshot": …, "confirm": true}` 才执行，并在写盘前把当前 `rooms.json` 备份为 `.pre-restore.bak`。导入的快照会**先整体校验**——格式、内容哈希、事件链，任何一项不通过就拒绝，不会覆盖现有状态；被替换的房间会以与运行中回合相同的方式作废，不会留下一个还在往旧对象里写入的回合。
+
+**关系派生。** `lib/relationship.js` 是一个纯函数：只读事件日志，为房间内每一对「观察者 → 对象」（包含自己对自己）派生出十个计数器，两个派生结果**逐字节相同**——不读墙钟、不用随机数、不调用模型，事件先按 `(tick, at, id)` 排序再计数，因而可重算、可追溯、可审计。
+
+| 计数器 | 读什么 |
+| --- | --- |
+| `deliveriesOffered` / `deliveryFailures` / `deliverySuccesses` | 发给该成员的 `delivery.sent` / `delivery.settled` 及其状态 |
+| `reviewsApproved` / `reviewsChangesRequested` | 该成员作为验收人**亲手写下**的验收结论（只算写下它的那一条变迁） |
+| `blockedReports` / `blockedConfirmed` | 该成员报告阻断、以及后来被解除或被处置的次数（按事项配对，不用时间差猜） |
+| `unresolvedDisagreements` | 最终状态仍未闭环的分歧 |
+| `charterProposalsSuperseded` | 该成员提出、后来被新提案取代的章程提案 |
+| `messagesAuthored` | 该成员署名的 `message.created` |
+
+成员集合来自 `member.added` / `member.removed`。在一份早于这些事件的旧日志里，它仍按「回合名单 ∪ 投递对象」推断，以免既有的对话在升级后变成空集合；代价是只出现在陈旧投递里的会话也可能得到一行全零——这是审计上更安全的方向，且只可能出现在无法陈述该事实的旧日志里。
+
+需要说清楚的现状：十个计数器里有**六个消费 `ledger.transition`**，而在 Task 2.2 之前没有任何地方发出这个事件——在那之前它们只会读到静默的 `0`。这些计数器目前可以从日志重算，但还没有通过工具或 HTTP 端点暴露，也没有写回任何事件。
+
+**这一层还没有做的事**（都排在后续阶段）：没有 `relationship.snapshot` 事件与「当前关系」投影；没有模型 appraisal 覆盖层（带证据、可撤销的印象）和合并注入；没有默认关闭的治理门；没有跨 run 的实验脚手架（干预 API、run manifest、评测脚本）。本版不提供保留期、轮转或日志裁剪工具。
+
 ### 章程自更新
 
 房间的目标与协作章程可由 Agent 提议、全员确认后自动生效，不需要用户手动抄录：
