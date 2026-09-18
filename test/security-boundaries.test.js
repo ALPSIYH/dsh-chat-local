@@ -82,9 +82,19 @@ test('a restricted group turn refuses a tool whose name merely starts with a rea
   }
   // The concrete names the previous prefix regex allowed keep their treatment:
   // refusing them here would be a capability change this fix must not make.
-  for (const name of ['read_file', 'read_image', 'list_agents', 'get_goal']) {
+  // `read_file`, `read_image`, `view_image`, `list_agents` and `get_goal` were
+  // permitted by the regex; `list_subagent_models` (dsh-tool-subagent) and
+  // `read_artifact` (dsh-deepresearch) are the deployment's own read-only tools
+  // that the regex also permitted, found by enumerating every tool registration
+  // in the installed packages and this profile.
+  for (const name of ['read_file', 'read_image', 'view_image', 'list_agents', 'get_goal',
+    'list_subagent_models', 'read_artifact']) {
     assert.equal(h.service.guardToolExecution(exec(name, {})), undefined, `${name} was allowed before and stays allowed`);
   }
+  // The set is compared case-sensitively (the regex carried /i), so an
+  // upper-cased spelling is refused. That is stricter in the safe direction and
+  // every registered tool name is lower-case, so it is the intended behaviour.
+  assert.match(h.service.guardToolExecution(exec('READ_FILE', {})), /Host 已拒绝非只读工具/);
 });
 
 test('updating only the charter keeps the room purpose', async () => {
