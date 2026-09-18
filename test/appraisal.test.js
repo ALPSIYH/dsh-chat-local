@@ -412,6 +412,25 @@ test("a revocation cannot be forged against a different statement than the one i
   } finally { await h.close(); }
 });
 
+test("a revocation may name only the counterparty, and retires the statement in force", async () => {
+  const h = await bootPlugin();
+  try {
+    const first = await recordAppraisal(h, "s1");
+    await h.endTurn(first.call);
+    const record = (await h.events()).find((event) => event.type === "appraisal");
+    const second = await h.schedule("请再评估", ["s1"]);
+    await h.openTurn(second);
+    // `appraisalId` is optional: naming only the counterparty retires whatever
+    // is currently in force for that pair, which is what the README promises.
+    const revoked = await h.tool("chat_appraise").execute({ room: h.room.id, action: "revoke",
+      aboutAgentId: "s2" }, h.exec("s1"));
+    assert.equal(revoked.revokedAppraisalId, String(record.id));
+    const events = await h.events();
+    assert.equal(events.find((event) => event.id === revoked.appraisalId).payload.revokesAppraisalId, String(record.id));
+    assert.equal((await h.request(`/rooms/${h.room.id}/appraisals`)).s1?.s2, null);
+  } finally { await h.close(); }
+});
+
 test("one observer's appraisal reaches that observer's row and no other", async () => {
   const h = await bootPlugin();
   try {
