@@ -80,6 +80,12 @@
 
 **Interfaces:** 事件 `ledger.transition`，`payload = {entryId, revision, kind, action, status, ownerSessionId, reviewerSessionId, verdict, state, dispositionAction?}`，与既有 `message.created` 一样**经队列在 save 成功后 flush**（R20）。
 
+**本任务必须一并满足的三条（controller 裁定，均因 Task 2.1 的审查发现）**
+
+- **R44（计划缺口）**：`payload` 还必须带 **`proposerSessionId` 与 `replacesProposalId`**（章程提案被取代时）。理由：`charterProposalsSuperseded` 计数器（Task 2.1 已实现）读的正是这两个字段，而原计划的 payload 列表把它们漏了 —— 照原样实现会让该计数器**永远读到静默 0**。除此之外，全库没有任何 `charter.*` 事件，因此这两个字段必须落在 `ledger.transition` 上（或另行发射带这两个字段的 `charter.*` 事件）。
+- **R41（成员身份）**：新增 **`member.added` / `member.removed`** 事件（含 `sessionId`、`alias`、`role`、`at`）。理由：日志里目前没有成员增删事实，Task 2.1 只能从 `turn.scheduled`/`delivery.sent` **推断**成员集合，代价是「从未出现在回合或交付里的成员不可见」「只在陈旧交付里被点名的会话得到一行全零」。成员身份是关系层的基础事实，必须来自日志本身。
+- **R43（去重）**：把 `CLOSED_LEDGER_STATUSES` 从 `lib/room-store.js` 移到中性的 `lib/work-protocol.js`（`room-store.js` 已在 import 它），两侧都 import 它。理由：Task 2.1 因禁止 import `room-store.js` 而**复制**了一份，注释写着"两者必须同步移动"—— 这类注释会腐烂。
+
 - [ ] **Step 1:** 写失败测试：`operateWork` 的每个动作（record/acknowledge/progress/submit/review/comment/amend）产出恰好一条 `ledger.transition`，字段与状态一致；replay 不产生第二条。
 - [ ] **Step 2:** 确认失败（无该事件）。
 - [ ] **Step 3:** 在 `#commitLedger` 处统一发射（**一处**，不要在每个动作里复制）。
