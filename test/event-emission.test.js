@@ -323,8 +323,12 @@ test("a delivery event names the same delivery the prompt does, so the pair join
  */
 test("a member who replies before the sent transition flushes still gets a delivery.sent", async () => {
   const h = await harness({ autoDeliver: true });
+  // Declared outside the try so the hold below can be released from the finally:
+  // `close()` awaits `saveTail`, so a failed assertion that skipped the release
+  // would leave the process running forever instead of reporting the failure —
+  // and `node --test` applies no per-test timeout.
+  let release;
   try {
-    let release;
     const inFlight = new Promise((resolve) => { release = resolve; });
     const deliveriesOf = () => h.service.state.rooms.find((room) => room.id === h.room.id)
       .messages.flatMap((message) => message.deliveries);
@@ -364,6 +368,9 @@ test("a member who replies before the sent transition flushes still gets a deliv
       `offered ${row.deliveriesOffered} undercounts ${row.deliverySuccesses} success + ${row.deliveryFailures} failure`);
     assert.deepEqual(verifyChain(events), { ok: true, brokenAt: null });
   } finally {
+    // Release the hold even when an assertion above threw: resolving twice is a
+    // no-op, so the success path's own `release()` is not disturbed.
+    release?.();
     await h.service.close();
     await rm(h.directory, { recursive: true, force: true });
   }
