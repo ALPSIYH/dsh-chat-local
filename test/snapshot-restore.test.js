@@ -1,12 +1,21 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, readFile, writeFile } from "node:fs/promises";
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { validateSnapshot } from "../lib/room-export.js";
 import { verifyChain } from "../lib/event-log.js";
 import { DshChatLocalService } from "../lib/room-store.js";
+
+/**
+ * The `randomUUID` a state write is pinned to when a test needs to fail exactly
+ * that write. The write path names its temp file `${destination}.${uuid}.tmp`
+ * and takes the uuid from the global, so stubbing the global pins the path and a
+ * directory can be placed there. The write then fails with the kernel's EISDIR
+ * without the destination — the durable state file — being touched at all.
+ */
+const PINNED_TEMP = "00000000-0000-4000-8000-000000000000";
 
 async function serviceAt(directory) {
   const ctx = { agents: { get: () => undefined },
@@ -324,14 +333,17 @@ test("a restore's state file is not rewritten by the turn it superseded", async 
  * A restore whose own state write fails has to roll back, keep the audits its
  * save claimed, and keep the append a save that landed in its window still owes.
  *
- * The write fails for real, at the filesystem: the destination is occupied by a
- * directory the instant the restore's save reaches it, so the `rename` that
- * installs the snapshot fails with the kernel's EISDIR, the way a vanished or
- * read-only path does in production. A synthetic rejected promise would not model
- * this — the previous version of this test threw before `#save` reached its
- * guarded write, so the audits it had claimed were never re-queued and the path
- * the product actually takes had no coverage — and a single failing save is never
- * concurrent with another flush, so it could not cover the window either.
+ * The write fails for real, at the filesystem: a directory is put at the exact
+ * temp path the restore's own write will use, so its write fails with the
+ * kernel's EISDIR, the way a vanished or read-only path does in production. That
+ * path is pinned by stubbing the one input that names it, the write's
+ * `randomUUID`. The destination is left as it was, so the test does not write
+ * `rooms.json` and the assertion on it can be about the file the failed restore
+ * did not produce. A synthetic rejected promise would not model this — the
+ * previous version of this test threw before `#save` reached its guarded write,
+ * so the audits it had claimed were never re-queued and the path the product
+ * actually takes had no coverage — and a single failing save is never concurrent
+ * with another flush, so it could not cover the window either.
  */
 test("a restore whose save fails leaves memory exactly as it was", async () => {
   const directory = await mkdtemp(join(tmpdir(), "dcl-snap-"));
@@ -366,11 +378,18 @@ test("a restore whose save fails leaves memory exactly as it was", async () => {
   const restoring = service.restoreFromSnapshot(snapshot, { confirm: true });
   restoring.catch(() => {});
   await waitFor(() => service.pendingLogReplace.size > 0, "the restore's replace gate");
-  // The destination is made a directory the instant the producer's write has
-  // landed and published its flush — after that write and before the restore's
-  // own — so the restore's rename fails with EISDIR, a real failing write.
+  // The restore's write is failed for real, at the filesystem, the instant the
+  // producer's write has landed and published its flush — after that write and
+  // before the restore's own body runs. Its temp file is pinned by stubbing the
+  // one thing that names it (the write path has no other input), and a directory
+  // is put there, so the kernel refuses the write with EISDIR. The destination is
+  // never touched: the test makes no write to `rooms.json`, which is what lets
+  // the assertion below be about the file the failed restore did *not* produce.
+  const temporary = `${statePath}.${PINNED_TEMP}.tmp`;
   let durable = null;
+  let durableIno = null;
   let flush = service.auditFlush;
+  const realRandomUUID = crypto.randomUUID;
   Object.defineProperty(service, "auditFlush", {
     configurable: true,
     get() { return flush; },
@@ -378,20 +397,33 @@ test("a restore whose save fails leaves memory exactly as it was", async () => {
       flush = value;
       if (durable !== null || service.pendingLogReplace.size === 0) return;
       durable = readFileSync(statePath, "utf8");
-      rmSync(statePath);
-      mkdirSync(statePath);
+      durableIno = statSync(statePath).ino;
+      crypto.randomUUID = () => PINNED_TEMP;
+      mkdirSync(temporary);
     }
   });
-  releaseSave();
-  await assert.rejects(() => restoring, (error) => error.code === "EISDIR");
-  // Undo the test's own injection, so the bytes on disk are again the durable
-  // state the failed restore did not write.
-  rmSync(statePath, { recursive: true });
-  writeFileSync(statePath, durable, { mode: 0o600 });
+  try {
+    releaseSave();
+    await assert.rejects(() => restoring, (error) => error.code === "EISDIR");
+  } finally {
+    crypto.randomUUID = realRandomUUID;
+    rmSync(temporary, { recursive: true, force: true });
+  }
   assert.equal(service.state.rooms[0], previous, "the failed restore was rolled back in memory");
   assert.deepEqual((await service.messages(room.id)).map((message) => message.text), beforeMessages,
     "the failed restore was rolled back in memory");
-  assert.equal(await readFile(statePath, "utf8"), durable);
+  // The disk, not the test's own write: the bytes and the inode are the ones the
+  // producer's save left, captured before the restore's body ran. A restore that
+  // had replaced the file — as one that ignored its own failed write would —
+  // would put the older snapshot's bytes there, and a rename always installs a
+  // new inode, so both parts of this fail together. That the expectation really
+  // is the pre-restore state (which holds 二) and not the snapshot's (which does
+  // not) is what gives the pair its teeth.
+  assert.equal(durable.includes("二"), true, "the expectation is the pre-restore state, not the snapshot's");
+  assert.equal(await readFile(statePath, "utf8"), durable,
+    "the failed restore wrote the state file it never made durable");
+  assert.equal(statSync(statePath).ino, durableIno,
+    "the failed restore replaced the state file it never made durable");
   // A save after the failure re-claims what the failed one re-queued, and the
   // append the producer's write was owed is on the log now that the restore has
   // settled and the room it replaced is live again.
@@ -578,6 +610,94 @@ test("a failed-write audit re-queued across a restore does not leak into the rep
   assert.deepEqual(orphans, [], "a re-queued entry for the replaced room was appended into the restored log");
   assert.deepEqual(events, snapshot.events, "the restored log is exactly the snapshot's log");
   assert.deepEqual(verifyChain(events), { ok: true, brokenAt: null });
+  await service.close();
+});
+
+/**
+ * The wait a flush makes on a log replace is acyclic only because a room id has
+ * at most one replace in flight. With two, two concurrent restores of one room
+ * can each claim an audit entry for that room and wait on the other's replace —
+ * each released only after its own save returns, which it cannot while its flush
+ * is waiting. That is the mutual wait this test pins; both saves here claim an
+ * entry, which the round's liveness harness never constructed, so the schedule
+ * it exercises is reachable rather than hypothetical.
+ *
+ * The assertion on `maxInFlight` is taken before the schedules are released: on
+ * a tree without the per-room restore lock the second restore has already
+ * swapped and opened its replace by then, so this fails on the count instead of
+ * hanging, and the settle below is the backstop for the wait itself.
+ */
+test("two restores of one room are serialised, so the mutual wait cannot form", { timeout: 8_000 }, async () => {
+  const directory = await mkdtemp(join(tmpdir(), "dcl-snap-serial-"));
+  const service = await serviceAt(directory);
+  const room = await service.createRoom({ name: "串行", autoDeliver: false });
+  await service.send({ roomId: room.id, author: "human:me", authorKind: "human", text: "一" });
+  const snapshot = JSON.parse((await service.snapshotRun(room.id, "cfg")).content);
+  const live = service.state.rooms[0];
+  const registry = service.pendingLogReplace;
+  const open = registry.open.bind(registry);
+  let maxInFlight = 0;
+  registry.open = (roomId) => {
+    const entry = open(roomId);
+    maxInFlight = Math.max(maxInFlight, registry.size);
+    return entry;
+  };
+  const claim = (id) => ({ room: live,
+    build: () => ({ type: "probe.claimed", actor: { kind: "system", id: "system:probe" },
+      payload: { id }, provenance: { originClass: "system", sessionKind: "interactive" } }),
+    stillValid: () => true });
+  let releaseSave;
+  const held = new Promise((resolve) => { releaseSave = resolve; });
+  service.saveTail = held;
+  service.pendingAudit.push(claim("first"));
+  const first = service.restoreFromSnapshot(snapshot, { confirm: true });
+  first.catch(() => {});
+  await waitFor(() => service.pendingLogReplace.size === 1, "the first restore's replace");
+  service.pendingAudit.push(claim("second"));
+  const second = service.restoreFromSnapshot(snapshot, { confirm: true });
+  second.catch(() => {});
+  // On a tree without the per-room lock the second restore swaps and claims here;
+  // with it, the second restore is parked and has opened nothing.
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(maxInFlight, 1, "two log replaces were in flight for one room at once");
+  assert.equal(service.pendingLogReplace.size, 1, "only the running restore's replace is in flight");
+  releaseSave();
+  const settled = await Promise.allSettled([first, second]);
+  assert.deepEqual(settled.map((result) => result.status), ["fulfilled", "fulfilled"],
+    "a restore never settled: two replaces for one room can wait on each other forever");
+  assert.equal(registry.size, 0, "a log replace was left registered");
+  await service.settledAudit();
+  assert.deepEqual(verifyChain(await service.eventsFor(room.id)), { ok: true, brokenAt: null });
+  await service.close();
+});
+
+/**
+ * A flush re-looks-up a room's replace after every wait, so the registry must
+ * drop an entry before that entry's promise can resolve. If it resolved while
+ * still registered, the re-lookup would find the same replace again on every
+ * pass and the flush would spin in microtasks forever — a hang in which even
+ * timers stop firing. The claim here is empty, so nothing waits on the replace
+ * and the registry's state at the moment it resolves is directly observable.
+ */
+test("a log replace is dropped from the registry before its waiters resume", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "dcl-snap-drop-"));
+  const service = await serviceAt(directory);
+  const room = await service.createRoom({ name: "掉落", autoDeliver: false });
+  await service.send({ roomId: room.id, author: "human:me", authorKind: "human", text: "一" });
+  const snapshot = JSON.parse((await service.snapshotRun(room.id, "cfg")).content);
+  let releaseSave;
+  const held = new Promise((resolve) => { releaseSave = resolve; });
+  service.saveTail = held;
+  const restoring = service.restoreFromSnapshot(snapshot, { confirm: true });
+  await waitFor(() => service.pendingLogReplace.get(room.id), "the restore's replace");
+  const replace = service.pendingLogReplace.get(room.id);
+  let observed = "the replace never resolved";
+  void replace.promise.then(() => { observed = service.pendingLogReplace.get(room.id); });
+  releaseSave();
+  await restoring;
+  assert.equal(observed, null,
+    "the replace was still registered when it resolved, so a flush that re-looks-up would wait on it again forever");
+  assert.equal(service.pendingLogReplace.size, 0, "a log replace was left registered");
   await service.close();
 });
 
