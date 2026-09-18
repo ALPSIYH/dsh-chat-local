@@ -798,6 +798,14 @@ test("run.manifest and injection.cost are ignored by name, and move no counter",
   // The lock on the names: the list this module declares ignored is exactly the
   // experiment layer's two types, so neither side can drift without a failure.
   assert.deepEqual([...RELATIONSHIP_IGNORED_EVENT_TYPES], [RUN_MANIFEST_EVENT_TYPE, INJECTION_COST_EVENT_TYPE]);
+  // What this locks, and what it does not — stated rather than implied, because
+  // the gap is not closable and a reader should not take more from a green test
+  // than it holds. It pins the behaviour (neither type moves a counter or enters
+  // the basis) and the two names. It cannot pin the existence of the explicit
+  // ignore branch in the counting loop: deleting that branch entirely also
+  // passes, because an unhandled type already falls through and counts nothing.
+  // The branch is what makes the decision readable on the line where it is made;
+  // no input can make it necessary, so no assertion here can either.
 });
 
 /**
