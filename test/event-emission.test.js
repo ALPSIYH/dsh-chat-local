@@ -42,7 +42,7 @@ async function harness(options = {}) {
   await service.ready;
   const room = await service.createRoom({ name: "事件测试", autoDeliver: options.autoDeliver ?? false,
     members: [{ kind: "session", sessionId: "s1", alias: "成员" }] });
-  return { directory, service, room, calls };
+  return { directory, service, room, calls, ctx };
 }
 
 test("sending a message appends an immutable message.created event with provenance", async () => {
@@ -301,6 +301,112 @@ test("a delivery event names the same delivery the prompt does, so the pair join
   // delivery it produced needs tick order plus member: an inference, not a join.
   assert.equal(sent.payload.deliveryId, prompt.payload.deliveryId);
   assert.equal(settled.payload.deliveryId, prompt.payload.deliveryId);
+});
+
+/**
+ * A member who replies before the save that persists `sent` has flushed used to
+ * cost the log that transition permanently: the delivery object is mutated in
+ * place, so by flush time it already read `delivered`, and the save that really
+ * did write `sent` dropped its own event. The hole is not recoverable from the
+ * log — `deliveriesOffered` counts `delivery.sent`, and every
+ * `relationship.snapshot` bakes those counters in — so the decision belongs to
+ * the snapshot that carries the status, not to the object after later statuses
+ * moved it on.
+ *
+ * The window is made deterministic rather than sampled. The bridge hands the
+ * save that persists `sent` a promise this test holds, so the member's reply
+ * lands while that save is genuinely in flight — the order a loaded machine
+ * produces, without depending on one. The delivery is observed reaching `sent`
+ * before the reply is driven, so the transition under test is the one that was
+ * applied; a reply that won earlier still leaves no `delivery.sent`, but it is a
+ * different case and not the completeness property asserted here.
+ */
+test("a member who replies before the sent transition flushes still gets a delivery.sent", async () => {
+  const h = await harness({ autoDeliver: true });
+  try {
+    let release;
+    const inFlight = new Promise((resolve) => { release = resolve; });
+    const deliveriesOf = () => h.service.state.rooms.find((room) => room.id === h.room.id)
+      .messages.flatMap((message) => message.deliveries);
+    const statusOf = (id) => deliveriesOf().find((delivery) => delivery.id === id)?.status;
+    // Every save issued after this point waits on a promise the test holds, so
+    // the reply below is driven while the `sent` save is still in flight.
+    h.ctx.dshBridge.deliverExternal = async (from, to, text, delivery) => {
+      h.calls.push({ from, to, text, delivery });
+      h.service.saveTail = inFlight;
+    };
+    await h.service.send({ roomId: h.room.id, author: "human:me", authorKind: "human", text: "开始" });
+    const call = await waitFor(() => h.calls[0], "the member delivery");
+    // The `sent` transition was applied and its snapshot claimed — `#save`
+    // serialises and claims synchronously — and its write is what is held.
+    await waitFor(() => statusOf(call.delivery.id) === "sent", "the sent transition to be applied");
+    const reply = replyTo(h.service, call, "回复");
+    // The reply moves the delivery on while the `sent` save has not landed.
+    await waitFor(() => statusOf(call.delivery.id) === "delivered", "the reply to move the delivery on");
+    release();
+    await reply;
+    await h.service.settledAudit();
+    const events = await h.service.eventsFor(h.room.id);
+    const sent = events.find((event) => event.type === "delivery.sent"
+      && event.payload.deliveryId === call.delivery.id);
+    assert.ok(sent, "the transition that reached disk must be in the log");
+    // The delivery did pass through `sent` on its way: the settle that moved it
+    // on names what it replaced, so this is the durable proof that the state the
+    // `sent` save wrote held `sent`.
+    const delivered = events.find((event) => event.type === "delivery.settled"
+      && event.payload.deliveryId === call.delivery.id && event.payload.status === "delivered");
+    assert.equal(delivered?.payload.previous, "sent", "the delivery moved on from sent");
+    // The counter this log sums must not undercount the delivery the room
+    // offered: `deliveriesOffered` is read from `delivery.sent` alone.
+    const derived = deriveRelationships({ events, roomId: h.room.id });
+    const row = derived.pairs.find((pair) => pair.observer === "s1" && pair.target === "s1").counters;
+    assert.ok(row.deliveriesOffered >= row.deliverySuccesses + row.deliveryFailures,
+      `offered ${row.deliveriesOffered} undercounts ${row.deliverySuccesses} success + ${row.deliveryFailures} failure`);
+    assert.deepEqual(verifyChain(events), { ok: true, brokenAt: null });
+  } finally {
+    await h.service.close();
+    await rm(h.directory, { recursive: true, force: true });
+  }
+});
+
+/**
+ * The other half of the same decision, and the one that must stay where it was:
+ * a transition queued on the room the restore path is about to replace is not
+ * the state the save writes, so it is never appended. Judging "does this save's
+ * snapshot carry the status" at claim time must not turn into recording a
+ * transition from a room that no longer exists.
+ */
+test("a delivery transition on the room a restore replaces is never appended", async () => {
+  const h = await harness({ autoDeliver: true });
+  try {
+    await h.service.send({ roomId: h.room.id, author: "human:me", authorKind: "human", text: "开始" });
+    const call = await waitFor(() => h.calls[0], "the member delivery");
+    // The state to come back to, taken before the member's turn moves anything.
+    const snapshot = JSON.parse((await h.service.snapshotRun(h.room.id, "cfg")).content);
+    // The member's turn is open and unfinished, so its delivery is live and its
+    // capture is still pending when the restore swaps the room underneath it.
+    await h.service.observeSessionEvent(call.to, { type: "turn/start", data: { turn: 1 } });
+    await h.service.observeSessionEvent(call.to, { type: "user/message", data: { content: [{ type: "text",
+      text: `[dsh-bridge dsh-chat-local-room message ${call.delivery.id} from ${call.from}]` }] } });
+    await h.service.observeSessionEvent(call.to, { type: "assistant/message", data: { turn: 1, step: 1,
+      message: { content: [{ type: "text", text: "还没结束" }] } } });
+    const live = (await h.service.messages(h.room.id)).flatMap((message) => message.deliveries);
+    assert.equal(live.at(-1).status, "working", "the delivery must be live when the room is replaced");
+    const restored = await h.service.restoreFromSnapshot(snapshot, { confirm: true });
+    assert.equal(restored.roomId, h.room.id);
+    const events = await h.service.eventsFor(h.room.id);
+    // The superseded transitions were queued against the replaced room object,
+    // and the save that carried them wrote the restored room instead.
+    assert.deepEqual(events.filter((event) => event.type === "delivery.settled"
+      && event.payload.status === "superseded"), []);
+    // Nothing else from the discarded room survives either: the log is exactly
+    // what the snapshot restored.
+    assert.deepEqual(events, snapshot.events);
+    assert.deepEqual(verifyChain(events), { ok: true, brokenAt: null });
+  } finally {
+    await h.service.close();
+    await rm(h.directory, { recursive: true, force: true });
+  }
 });
 
 test("eventsFor never returns a snapshot missing an append that was already recorded", async () => {
@@ -860,10 +966,16 @@ test("a turn records one relationship snapshot equal to the derivation that prec
     mentions: ["s1"] });
   const call = await waitFor(() => h.calls[0], "the member delivery");
   await replyTo(h.service, call, "回复");
-  const events = await waitFor(async () => {
-    const found = await h.service.eventsFor(h.room.id);
-    return found.some((event) => event.type === "relationship.snapshot") ? found : undefined;
-  }, "the relationship snapshot");
+  // The read point is the end of the turn, not the instant the snapshot becomes
+  // visible. The deliveries of this turn are recorded without their caller
+  // awaiting them, so a read taken as soon as the snapshot appears can see it
+  // while the first `delivery.sent` behind it is still queued — and
+  // `firstDelivery > index` below would then be a statement about the read
+  // rather than about the log. That window is real: 32 of 80 runs sampled it on
+  // the unfixed read point, and 0 of 80 settled reads disagreed.
+  await quiesce(h.service, h.room.id);
+  await h.service.settledAudit();
+  const events = await h.service.eventsFor(h.room.id);
   const snapshots = events.filter((event) => event.type === "relationship.snapshot");
   assert.equal(snapshots.length, 1, "one scheduled turn, one snapshot");
   const index = events.indexOf(snapshots[0]);
