@@ -79,7 +79,7 @@ dsh plugin --profile web add link:/path/to/dsh-chat-local
 
 ### 事件日志与关系派生
 
-除了 `rooms.json` 这份「当前状态」，每个对话还有一份**只追加的事件日志**：`~/.dsh/dsh-chat-local/events/<roomId>.jsonl`，一行一个事件，逐条用 SHA-256 串成链，同目录的 `<roomId>.head` 记录该房间最后一个事件的哈希（头部锚点）。日志不是读模型，而是「当时到底发生了什么」的审计记录：事件的正文一旦写入就不再修改或重写，房间被软删除或彻底移除也不会删掉它的日志。每个事件带版本号 `v`、`id`、`at`（epoch 毫秒）、`tick`、类型、`actor`、`payload`、`causes`、`provenance`、前一事件的 `prev` 与自身 `hash`。
+除了 `rooms.json` 这份「当前状态」，每个对话还有一份**只追加的事件日志**：`~/.dsh/dsh-chat-local/events/<roomId>.jsonl`，一行一个事件，逐条用 SHA-256 串成链，同目录的 `<roomId>.jsonl.head` 记录该房间最后一个事件的哈希（头部锚点）。日志不是读模型，而是「当时到底发生了什么」的审计记录：事件的正文一旦写入就不再修改或重写（唯一的例外是从快照恢复——见下文，恢复会整份替换该房间的日志），房间被软删除或彻底移除也不会删掉它的日志。每个事件带版本号 `v`、`id`、`at`（epoch 毫秒）、`tick`、类型、`actor`、`payload`、`causes`、`provenance`、前一事件的 `prev` 与自身 `hash`。
 
 | 事件 | 记录的事实 |
 | --- | --- |
