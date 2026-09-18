@@ -575,6 +575,21 @@ test("turning the gate on only adds refusals, and never rewrites one that alread
       assert.equal(event.payload.basis.counters.deliveryFailures, 1);
       assert.equal(event.payload.basis.counters.deliverySuccesses, 0);
     }
+    // The tool table is the only place a tool's kind is decided, and a tool it
+    // does not name is read conservatively. This member carries no open
+    // disagreement of their own, so the review reading has nothing to fire on
+    // here — the lock for that reading lives beside the pure judgement — but the
+    // high-impact reading must reach a tool nobody registered, or leaving a tool
+    // out of the table would be the way around the rule.
+    h.setSample([{ observer: "s1", target: "s1", tick: 1,
+      counters: { deliveryFailures: 1, deliverySuccesses: 0, unresolvedDisagreements: 0 } }]);
+    const unlisted = h.service.guardToolExecution(exec("some_tool_from_the_future", { x: 1 }));
+    assert.match(unlisted, /要求先由用户确认/);
+    const last = (await h.events()).filter((event) => event.type === "action_gate").at(-1);
+    assert.equal(last.payload.tool, "some_tool_from_the_future");
+    assert.equal(last.payload.judgement, "require_confirmation");
+    assert.equal(last.payload.riskClass, "high");
+    assert.equal(last.payload.action, "execute");
   } finally {
     await h.close();
   }

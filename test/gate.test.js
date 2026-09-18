@@ -163,9 +163,35 @@ test("a tool execution becomes a risk class and an action, or nothing the gate c
   // An unlisted tool is classified conservatively, not left unreadable.
   assert.deepEqual(classifyToolExecution("some_tool_from_the_future"), GATE_UNCLASSIFIED_TOOL);
   assert.equal(GATE_UNCLASSIFIED_TOOL.riskClass, "high");
+  assert.equal(GATE_UNCLASSIFIED_TOOL.unclassified, true,
+    "an unlisted tool is also a possible review action");
   // A missing name cannot be classified at all.
   for (const name of ["", undefined, null, 7]) {
     assert.equal(classifyToolExecution(name, {}).riskClass, undefined);
     assert.equal(classifyToolExecution(name, {}).action, undefined);
   }
+});
+
+test("a tool the table does not name is read as a possible review as well as high impact", () => {
+  const unresolved = PAIR({ unresolvedDisagreements: 1, deliveryFailures: 0, deliverySuccesses: 5 });
+  // The unlisted tool's own classification, read the way the guard reads it.
+  const classification = classifyToolExecution("some_tool_from_the_future", {});
+  const judge = (policy, pair) => evaluateGate({ pair, policy, ...classification });
+  // The member carries an open disagreement, so an action that might be a review
+  // is refused: leaving a tool out of the table must not be a way to self-review.
+  assert.equal(judge(ON, unresolved), "require_independent_review");
+  assert.equal(judge(ON, PAIR({ unresolvedDisagreements: 0 })), "allow");
+  // And the high-impact reading still holds, for a member the room cannot reach.
+  assert.equal(judge(ON, PAIR({ deliveryFailures: 2, deliverySuccesses: 0 })), "require_confirmation");
+  // Both hold: the independent reviewer speaks, exactly as for a named review.
+  assert.equal(judge(ON, PAIR({ unresolvedDisagreements: 1, deliveryFailures: 2, deliverySuccesses: 0 })),
+    "require_independent_review");
+  // Table membership is what decides this: a named `execute` tool with the same
+  // counters is judged by the confirmation rule alone.
+  assert.equal(evaluateGate({ pair: unresolved, action: "execute", riskClass: "high", policy: ON }), "allow");
+  assert.equal(evaluateGate({ pair: unresolved, action: "review", riskClass: "low", policy: ON }),
+    "require_independent_review");
+  // Off is still off, and no snapshot still establishes nothing about anyone.
+  assert.equal(judge(OFF, unresolved), "allow");
+  assert.equal(judge(ON, undefined), "allow");
 });
