@@ -96,7 +96,7 @@ dsh plugin --profile web add link:/path/to/dsh-chat-local
 | `run.manifest` | 一次 run 的固定配置：臂（`arm`）、运行时实际报告的模型、状态版本、起始 tick、注入配置哈希 |
 | `injection.cost` | 一次唤醒**实际注入**的关系摘要字符数与哈希、整条提示词长度，以及明确标注为估算的 token 数 |
 
-事件的追加**跟随着状态落盘**：`message.created`、`ledger.transition`、`member.*`、`relationship.snapshot`、`delivery.sent` / `delivery.settled` 都先进审计队列，由把对应状态写进磁盘的那次保存来 flush；那次保存失败，事件就留到下一次成功的保存，绝不会为一份没有落盘的 revision、成员关系或投递状态留下幻影记录。另一类事件（`turn.scheduled`、`turn.prompt`、`injection.cost`、`relationship.intervention`）在追加时立即写入：它们描述的是已经落盘的 tick、已经构造好的提示词或实验自身的记录，不依赖一次尚未落盘的房间状态。`reset_per_episode` 臂在每个回合开头自动追加的那条干预必须走这条路径——该回合的快照与提示词都要读到它，它不能等到下一次保存才可见。反过来，日志写入失败也不会让房间操作失败：它只计入健康计数，房间照常工作。
+事件的追加**跟随着状态落盘**：`message.created`、`ledger.transition`、`member.*`、`relationship.snapshot`、`delivery.sent` / `delivery.settled` 都先进审计队列，由把对应状态写进磁盘的那次保存来 flush；那次保存失败，事件就留到下一次成功的保存，绝不会为一份没有落盘的 revision、成员关系或投递状态留下幻影记录。另一类事件（`turn.scheduled`、`turn.prompt`、`injection.cost`、`relationship.intervention`）在追加时立即写入：它们描述的是已经落盘的 tick、已经构造好的提示词或实验自身的记录，不依赖一次尚未落盘的房间状态。`reset_per_episode` 臂在一局开局时自动追加的那条干预必须走这条路径——这一局里每个回合的快照与提示词都要读到它，它不能等到下一次保存才可见。反过来，日志写入失败也不会让房间操作失败：它只计入健康计数，房间照常工作。
 
 **离线校验。** `node scripts/verify-event-log.mjs <roomId> [--state <rooms.json>]` 打开状态目录（或它的副本），逐条重算 SHA-256 链并核对头部锚点，只读、不写入；链断、被改写或尾部被截断时以非零状态码退出并打印具体位置。这个脚本校验的是**磁盘上的日志**；运行中的插件不校验在线日志，`verifyChain` 在生产路径上只用于导入快照时的事件链校验。
 
@@ -170,7 +170,7 @@ dsh plugin --profile web add link:/path/to/dsh-chat-local
 
 哈希**不覆盖**什么也要说清楚：它不覆盖房间日志本身。计数器是这份日志的函数，所以两次 run 按定义会注入不同的文本，而那正是实验要比较的东西。它给出的承诺是「同一份派生会不会被渲染成同一段文本」，而不是「两个 run 注入了相同的字节」。另一条残余是严格带来的：算法函数里连注释或排版改动都会改变哈希并因此把 run 分成两组——这是保守的方向（宁可不合并），代价是重排代码也会换组。哈希对键序不敏感：等价配置得到同一哈希。
 
-**两条臂。** `arm` 决定关系状态是否跨 episode 携带：`persistent`（没有 manifest 时的默认）累积；`reset_per_episode` 在**每个新回合一开头**自动追加一条 `clear` 干预，`mechanism: "arm:reset_per_episode"`、`appliedBy: "arm"`，同样记录干预前的 counters，并记录它开启的是哪一局（`episodeId`，即那条根消息）。一局就是**一条根消息的整段回合序列**：投递失败后重试会让同一个根消息再跑一次回合，但那仍是同一局，不会再追加第二条 `clear`；只有新的一条 `run.manifest` 才开启新的一局。臂是从**房间自己的日志**读回来的（最近一条 `run.manifest`），不是进程设置：重启不会悄悄换臂，同一进程里的两个房间也可以处于不同臂。同一份交互在两条臂下这一回合的快照确实不同——`persistent` 带着上一回合的计数，`reset_per_episode` 从零开始。
+**两条臂。** `arm` 决定关系状态是否跨 episode 携带：`persistent`（没有 manifest 时的默认）累积；`reset_per_episode` 在**每一局开头**自动追加一条 `clear` 干预，`mechanism: "arm:reset_per_episode"`、`appliedBy: "arm"`，同样记录干预前的 counters，并记录它开启的是哪一局（`episodeId`，即那条根消息）。一局就是**一条根消息的整段回合序列**：投递失败后重试会让同一个根消息再跑一次回合，但那仍是同一局，不会再追加第二条 `clear`；只有新的一条 `run.manifest` 才开启新的一局。臂是从**房间自己的日志**读回来的（最近一条 `run.manifest`），不是进程设置：重启不会悄悄换臂，同一进程里的两个房间也可以处于不同臂。同一份交互在两条臂下这一回合的快照确实不同——`persistent` 带着上一回合的计数，`reset_per_episode` 从零开始。
 
 **注入成本。** 每次唤醒成员，除了 `turn.prompt` 还会追加一条 `injection.cost`：`digestChars` 是**实际注入的那段摘要**的字符数（不是上限），`digestHash` 是它的 SHA-256，`promptChars` 是整条提示词的长度，另有 `estimatedTokens` 以及它明确标注为估算的算法（`tokenEstimateMethod`，`tokenEstimateExact: false`）和估算用到的码点计数。记录它不改变注入文本，也不改变 600 字符上限。
 
