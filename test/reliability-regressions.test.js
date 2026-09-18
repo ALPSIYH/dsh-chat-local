@@ -193,6 +193,27 @@ test('coalesced cross-room markers keep the stricter policy and cannot publish m
   assert.equal(h.service.guardToolExecution({name:'bash',agent:{session:{id:'s1'}}}),undefined);
 });
 
+test('a marker with no tracked turn still settles, records delivered, and arms the guard',async t=>{
+  const h=await harness();t.after(()=>h.service.close());
+  const room=await h.room('重挂载后的投递');
+  await h.send(room.id,'重挂载检查');await waitFor(()=>h.calls.length===1);
+  const call=h.calls[0];
+  // A remount while the member's DSH turn is already running: this instance
+  // never saw that turn's `turn/start`, so neither map holds anything for "s1".
+  // `capture.turn` is therefore `undefined` here, and no lock exists yet.
+  assert.equal(h.service.turnBySession.get('s1'),undefined,'the fixture must not have observed a turn');
+  assert.equal(h.service.policyLocks.get('s1'),undefined,'the fixture must not already hold a policy lock');
+  await h.service.observeSessionEvent('s1',{type:'user/message',data:{content:[{type:'text',text:
+    `[dsh-bridge dsh-chat-local-room message ${call.delivery.id} from room:${room.id}]\n重挂载检查`}]}});
+  const events=await h.service.eventsFor(room.id);
+  const delivered=events.filter(event=>event.type==='delivery.settled'
+    &&event.payload.deliveryId===call.delivery.id&&event.payload.status==='delivered');
+  assert.equal(delivered.length,1,'the delivered transition must still be recorded for an untracked turn');
+  const denial=h.service.guardToolExecution({name:'bash',agent:{session:{id:'s1'}}});
+  assert.equal(typeof denial,'string','the room guard must not be inert after the marker was observed');
+  assert.match(denial,/Host 已拒绝/);
+});
+
 test('an unactivated queued timeout does not cancel another native Session turn',async t=>{
   const h=await harness({replyTimeoutMs:250});t.after(()=>h.service.close());const room=await h.room('排队超时');
   await h.send(room.id,'排队');await waitFor(()=>h.calls.length===1);
