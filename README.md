@@ -96,7 +96,12 @@ dsh plugin --profile web add link:/path/to/dsh-chat-local
 | `run.manifest` | 一次 run 的固定配置：臂（`arm`）、运行时实际报告的模型、状态版本、起始 tick、注入配置哈希 |
 | `injection.cost` | 一次唤醒**实际注入**的关系摘要字符数与哈希、整条提示词长度，以及明确标注为估算的 token 数 |
 
-事件的追加**跟随着状态落盘**：`message.created`、`ledger.transition`、`member.*`、`relationship.snapshot`、`delivery.sent` / `delivery.settled` 都先进审计队列，由把对应状态写进磁盘的那次保存来 flush；那次保存失败，事件就留到下一次成功的保存，绝不会为一份没有落盘的 revision、成员关系或投递状态留下幻影记录。另一类事件（`turn.scheduled`、`turn.prompt`、`injection.cost`、`relationship.intervention`）在追加时立即写入：它们描述的是已经落盘的 tick、已经构造好的提示词或实验自身的记录，不依赖一次尚未落盘的房间状态。`reset_per_episode` 臂在一局开局时自动追加的那条干预必须走这条路径——这一局里每个回合的快照与提示词都要读到它，它不能等到下一次保存才可见。反过来，日志写入失败也不会让房间操作失败：它只计入健康计数，房间照常工作。
+事件的追加**跟随着状态落盘**，但落盘与追加之间有两条不同的路径，说清楚哪类事件走哪条：
+
+- **经审计队列**（先入队，由把对应状态写进磁盘的那次保存来 flush；那次保存失败，事件就留到下一次成功的保存，绝不会为一份没有落盘的 revision、成员关系或投递状态留下幻影记录）：`ledger.transition`、`member.added` / `member.removed`、`relationship.snapshot`、存活回合里写下的 `delivery.sent` / `delivery.settled`，以及房间内的系统通知与回合结束时回收的 assistant 回复所产生的 `message.created`。
+- **自己那次保存之后直接追加**（不经过队列）：发送路径的 `message.created`——`#commitSend` 先 `await this.#save()`，再直接 `#recordMessage`，人类消息与回合内工具 `chat_send` 都走这里；重启恢复时补记的 `delivery.settled` 在 `#load` 的保存之后追加；`turn.scheduled`、`turn.prompt`、`injection.cost`、`relationship.intervention`、`appraisal`、`run.manifest` 与 `action_gate` 也立即写入，因为它们描述的是已经落盘的 tick、已经构造好的提示词或实验自身的记录，不依赖一次尚未落盘的房间状态。
+
+两条路径给的是**同一条可观察的保证：事件绝不会先于把它变成事实的那次保存**。区别只在失败时的行为——队列里的条目会留到下一次成功的保存，直接追加的那条只会计入健康计数、房间操作照常成功。`reset_per_episode` 臂在一局开局时自动追加的那条干预必须走直接追加这一条路径——这一局里每个回合的快照与提示词都要读到它，它不能等到下一次保存才可见。反过来，日志写入失败也不会让房间操作失败：它只计入健康计数，房间照常工作。
 
 **离线校验。** `node scripts/verify-event-log.mjs <roomId> [--state <rooms.json>]` 打开状态目录（或它的副本），逐条重算 SHA-256 链并核对头部锚点，只读、不写入；链断、被改写或尾部被截断时以非零状态码退出并打印具体位置。这个脚本校验的是**磁盘上的日志**；运行中的插件不校验在线日志，`verifyChain` 在生产路径上只用于导入快照时的事件链校验。
 
