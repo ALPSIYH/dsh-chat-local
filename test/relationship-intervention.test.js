@@ -292,7 +292,7 @@ test("a run manifest records the arm, the real models, the state version and the
     const manifest = await h.service.startRun(h.room.id, { arm: "persistent", appliedBy: "human" });
     const recorded = (await eventsOfType(h, RUN_MANIFEST_EVENT_TYPE))[0];
     assert.deepEqual(Object.keys(recorded.payload).sort(),
-      ["arm", "configHash", "initialStateVersion", "models", "startedAtTick"]);
+      ["arm", "config", "configHash", "initialStateVersion", "models", "startedAtTick"]);
     assert.equal(recorded.payload.arm, "persistent");
     assert.equal(recorded.payload.initialStateVersion, h.service.stateVersion());
     assert.equal(recorded.payload.startedAtTick, 0);
@@ -301,7 +301,13 @@ test("a run manifest records the arm, the real models, the state version and the
     // exactly that rather than inventing one.
     assert.deepEqual(recorded.payload.models, { s1: { provider: null, model: null }, s2: { provider: null, model: null } });
     assert.equal(manifest.configHash, recorded.payload.configHash);
-    assert.deepEqual(manifest.config, injectionConfigFor({ room: h.room, appraisalDigest: true }));
+    const room = await h.service.resolveRoom(h.room.id);
+    const personas = Object.fromEntries(await Promise.all(room.members.map(async member =>
+      [member.agentId, (await h.service.directory.persona(member.agentId)).hash])));
+    const expectedConfig = injectionConfigFor({ room, appraisalDigest: true, personalMemory: true, personas });
+    assert.deepEqual(manifest.config, expectedConfig);
+    assert.deepEqual(recorded.payload.config, expectedConfig);
+    assert.equal(recorded.payload.configHash, configHashOf(expectedConfig));
   } finally { await h.close(); }
 });
 
@@ -336,7 +342,11 @@ test("the config hash covers the injection cap, the gate and the judgement half"
       const offManifest = await off.service.startRun(off.room.id, { arm: "persistent", appliedBy: "human" });
       assert.notEqual(onManifest.configHash, offManifest.configHash,
         "switching the judgement half off must change the hash of a run");
-      assert.equal(offManifest.configHash, configHashOf(injectionConfigFor({ room: off.room, appraisalDigest: false })));
+      const offRoom = await off.service.resolveRoom(off.room.id);
+      const personas = Object.fromEntries(await Promise.all(offRoom.members.map(async member =>
+        [member.agentId, (await off.service.directory.persona(member.agentId)).hash])));
+      assert.equal(offManifest.configHash, configHashOf(injectionConfigFor({ room: offRoom, appraisalDigest: false,
+        personalMemory: true, personas })));
     } finally { await off.close(); }
   } finally { await h.close(); }
 });

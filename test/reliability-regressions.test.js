@@ -9,6 +9,7 @@ import { DshChatLocalService } from '../lib/room-store.js';
 import { readNativePermission } from '../lib/native-permissions.js';
 import { Readable } from 'node:stream';
 import { apply } from '../lib/index.js';
+import { blockStateFile } from './state-file-failure.js';
 
 async function waitFor(predicate) {
   const deadline = Date.now() + 2000;
@@ -74,11 +75,10 @@ test('P1: concurrent human sends must not create two live roots with the same ep
 test('P1: retry after failed persistence must actually persist the accepted message', async t => {
   const h = await harness(); t.after(() => h.service.close());
   const room = await h.room('落盘失败', false);
-  const badPath = join(h.directory, 'cannot-replace-directory'); await mkdir(badPath);
-  h.service.path = badPath;
+  const release = await blockStateFile(h.path); t.after(release);
   const input = { clientOperationId: 'stable-client-operation', automaticDelivery: false };
   await assert.rejects(h.send(room.id, '必须保存的消息', input), /EISDIR/);
-  h.service.path = h.path;
+  await release();
   const accepted = await h.send(room.id, '必须保存的消息', input);
   const persisted = JSON.parse(await readFile(h.path, 'utf8')).rooms.find(x => x.id === room.id).messages;
   t.diagnostic(JSON.stringify({ retryAcceptedId: accepted.id, memoryCount: (await h.service.messages(room.id)).length,
@@ -153,11 +153,11 @@ test('P2: retrying a correction after a lost response must not duplicate the cor
 test('failed commit retry schedules once, and concurrent identical retries share the commit receipt',async t=>{
   const h=await harness();t.after(()=>h.service.close());
   const room=await h.room('恢复投递');
-  const bad=join(h.directory,'bad');await mkdir(bad);h.service.path=bad;
+  const release=await blockStateFile(h.path);t.after(release);
   await assert.rejects(h.send(room.id,'恢复发送',{clientOperationId:'resume'}),/EISDIR/);
   assert.equal(h.calls.length,0);
   assert.equal((await h.service.messages(room.id))[0].savePending,true);
-  h.service.path=h.path;
+  await release();
   await Promise.all([h.send(room.id,'恢复发送',{clientOperationId:'resume'}),h.send(room.id,'恢复发送',{clientOperationId:'resume'})]);
   await waitFor(()=>h.calls.length===1);
   assert.equal((await h.service.messages(room.id)).length,1);
@@ -172,8 +172,8 @@ test('failed commit retry schedules once, and concurrent identical retries share
 
 test('retrying an older failed commit cannot supersede or restart a newer task',async t=>{
   const h=await harness();t.after(()=>h.service.close());const room=await h.room('旧请求');
-  const bad=join(h.directory,'bad');await mkdir(bad);h.service.path=bad;
-  await assert.rejects(h.send(room.id,'旧消息',{clientOperationId:'old'}));h.service.path=h.path;
+  const release=await blockStateFile(h.path);t.after(release);
+  await assert.rejects(h.send(room.id,'旧消息',{clientOperationId:'old'}));await release();
   const newer=await h.send(room.id,'新任务',{clientOperationId:'new'});await waitFor(()=>h.calls.length===1);
   await h.send(room.id,'旧消息',{clientOperationId:'old'});
   assert.equal(h.calls.length,1);assert.equal((await h.service.resolveRoom(room.id)).orchestration.rootMessageId,newer.id);
@@ -297,11 +297,11 @@ test('conditional client reads reuse unchanged values and mutations invalidate t
 test('concurrent first attempts with the same operation cannot acknowledge a failed save',async t=>{
   const h=await harness();t.after(()=>h.service.close());
   const room=await h.room('同时首次发送');
-  const bad=join(h.directory,'bad');await mkdir(bad);h.service.path=bad;
+  const release=await blockStateFile(h.path);t.after(release);
   const results=await Promise.allSettled([h.send(room.id,'相同操作',{clientOperationId:'first'}),h.send(room.id,'相同操作',{clientOperationId:'first'})]);
   assert.deepEqual(results.map(result=>result.status),['rejected','rejected']);
   assert.equal(h.calls.length,0);assert.equal((await h.service.messages(room.id)).length,1);
-  h.service.path=h.path;
+  await release();
   await h.send(room.id,'相同操作',{clientOperationId:'first'});await waitFor(()=>h.calls.length===1);
 });
 

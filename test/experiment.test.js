@@ -16,6 +16,7 @@ import {
   TOKEN_ESTIMATE_METHOD, configHashOf, dependentVariables, digestAlgorithmFingerprint, dispersion,
   estimateTokens, hasInteraction, injectionConfigFor, runArm, runManifests, runSegments,
   sourceFingerprint, sourceTexts, SOURCE_FINGERPRINT_MODULES } from "../lib/experiment.js";
+import * as digestContract from "../lib/experiment.js";
 import { RELATIONSHIP_VERSION } from "../lib/relationship.js";
 import { EVAL_FORMAT, INSUFFICIENT_EXIT, evaluate, renderText } from "../scripts/relationship-eval.mjs";
 
@@ -23,7 +24,7 @@ import { EVAL_FORMAT, INSUFFICIENT_EXIT, evaluate, renderText } from "../scripts
  * The experiment's pure arithmetic, and the evaluation script's behaviour.
  *
  * The script is exercised as a process (`node scripts/relationship-eval.mjs`)
- * because the properties under test are its own: that it refuses to conclude
+ * because the properties under test are its own: that it withholds default statistics
  * below ten runs, that it reports dispersion, that it never writes, and that it
  * pools only comparable runs. Its arithmetic is tested directly, so a failure
  * says which definition is wrong.
@@ -86,6 +87,7 @@ test("the config hash ignores key order at every depth", () => {
   const room = { policy: { gate: true, revision: 3 } };
   const first = injectionConfigFor({ room, appraisalDigest: true });
   const reordered = {
+    scope: first.scope, resetContract: first.resetContract, roomContext: first.roomContext, personalMemory: first.personalMemory, personas: first.personas,
     gate: first.gate, appraisalDigest: first.appraisalDigest, version: first.version,
     algorithm: first.algorithm, source: first.source, relationshipVersion: first.relationshipVersion,
     templates: first.templates, stances: first.stances, counters: first.counters,
@@ -150,7 +152,7 @@ test("the rendering algorithm's own source is part of the hash", () => {
   // The list is the whole rendering path, named, so a function added to the
   // algorithm without being listed here is a failure rather than a silent hole.
   assert.deepEqual(DIGEST_RENDERERS.map((renderer) => renderer.name).sort(),
-    ["boundedQuote", "digestAppraisalLine", "digestLabel", "digestRank", "fillTemplate", "positiveCount", "relationshipDigest", "renderDigest"]);
+    ["boundedQuote", "digestAppraisalLine", "digestLabel", "digestRank", "fillTemplate", "joinDigestLines", "positiveCount", "relationshipDigest", "renderDigest", "renderRelationshipDigest"]);
   // And the fingerprint is a real term of the hash, not decoration beside it.
   const base = injectionConfigFor({ room: { policy: {} }, appraisalDigest: true });
   assert.equal(base.algorithm, digestAlgorithmFingerprint(DIGEST_RENDERERS));
@@ -188,7 +190,17 @@ test("the whole source of the fingerprinted modules is part of the hash", () => 
   assert.notEqual(configHashOf({ ...config, source: `${base}0` }), configHashOf(config));
   // The list is the modules whose bytes decide the injected text, named, so a
   // new one has to be added deliberately rather than silently falling outside.
-  assert.deepEqual([...SOURCE_FINGERPRINT_MODULES], ["experiment.js", "relationship.js"]);
+  assert.deepEqual([...SOURCE_FINGERPRINT_MODULES], [
+    "experiment.js", "relationship.js", "agent-directory.js", "agent-memory.js", "agent-persona.js",
+    "collaboration-workspace.js", "conversation-model.js", "document-reader.js", "document-reference.js",
+    "event-log.js", "gate.js", "index.js", "native-conversations.js", "native-permissions.js",
+    "room-export.js", "room-journal.js", "room-store.js", "text-protocol.js", "work-protocol.js"
+  ]);
+  for (const [module, text] of sources) {
+    const dependencies = text.matchAll(/(?:from\s+|import\s*\()(["'])\.\/([^"']+\.js)\1/gu);
+    for (const dependency of dependencies) assert.ok(SOURCE_FINGERPRINT_MODULES.includes(dependency[2]),
+      `${module} imports ${dependency[2]} outside the source fingerprint`);
+  }
   // The derivation really is inside the fingerprinted text: `messagesAuthored`
   // is incremented in `lib/relationship.js`, which no renderer function list can
   // reach, so a `+= 1` to `+= 2` edit there used to change the rendered counters
@@ -196,6 +208,57 @@ test("the whole source of the fingerprinted modules is part of the hash", () => 
   const derivation = sources.find(([name]) => name === "relationship.js")?.[1] ?? "";
   assert.match(derivation, /counters\.messagesAuthored \+= 1;/u,
     "the counter derivation must be inside the fingerprinted bytes");
+});
+
+
+test("personal memory and persona identities are part of experiment configuration", () => {
+  const room = { members: [{ sessionId: "s1", alias: "A", agentId: "agent-a" }] };
+  const base = injectionConfigFor({ room, personalMemory: true, personas: { "agent-a": "hash-a" } });
+  const hash = configHashOf(base);
+  assert.notEqual(hash, configHashOf(injectionConfigFor({ room, personalMemory: false, personas: { "agent-a": "hash-a" } })));
+  assert.notEqual(hash, configHashOf(injectionConfigFor({ room, personalMemory: true, personas: { "agent-a": "hash-b" } })));
+  assert.notEqual(hash, configHashOf(injectionConfigFor({ room: { members: [{ ...room.members[0], agentId: "agent-b" }] }, personas: { "agent-a": "hash-a" } })));
+  assert.equal(base.personalMemory.maxChars, 600);
+  assert.equal(base.personalMemory.version, 1);
+  assert.deepEqual(base.resetContract, { resetScope: "plugin-memory-overlays", runtimeContextReset: false, sharedConversationReset: false });
+  assert.notEqual(hash, configHashOf({ ...base, resetContract: { ...base.resetContract, runtimeContextReset: true } }));
+});
+
+test("injection fingerprints include label mappings and meaningful room context", () => {
+  const room = { name: "room", profile: { charter: "verify claims", purpose: "audit" },
+    policy: { defaultActionMode: "discuss_only", gate: false },
+    members: [{ sessionId: "s1", alias: "A", role: "reviewer", mandate: "check evidence" },
+      { sessionId: "s2", alias: "B", role: "author", mandate: "state sources" }] };
+  const hash = (value) => configHashOf(injectionConfigFor({ room: value }));
+  for (const field of ["alias", "role", "mandate"]) {
+    const changed = structuredClone(room); changed.members[1][field] += " changed";
+    assert.notEqual(hash(changed), hash(room), `${field} changes the injection or its interpretation`);
+  }
+  const charter = structuredClone(room); charter.profile.charter += " strictly";
+  assert.notEqual(hash(charter), hash(room));
+  const policy = structuredClone(room); policy.policy.defaultActionMode = "read_only_audit";
+  assert.notEqual(hash(policy), hash(room));
+  assert.equal(hash({ ...room, revision: 99, updatedAt: 123 }), hash(room), "bookkeeping is not configuration");
+});
+
+test("bounded digest admits individual beliefs and reports every budget omission", () => {
+  assert.equal(typeof digestContract.renderRelationshipDigest, "function");
+  const options = { derived: { pairs: [
+    { observer: "me", target: "a", counters: { deliveryFailures: 1 } },
+    { observer: "me", target: "b", counters: { messagesAuthored: 1 } }] }, observer: "me", labelOf: id => id,
+    appraisals: { me: { a: { stance: "trust", confidence: 0.8, evidenceCount: 1, claim: "A".repeat(200), perceivedRole: "R".repeat(200) },
+      b: { stance: "distrust", confidence: 0.7, evidenceCount: 2, claim: "B".repeat(200), perceivedRole: "S".repeat(200) } },
+    other: { a: { stance: "trust", confidence: 1, evidenceCount: 1, claim: "PRIVATE_OTHER_OBSERVER" } } } };
+  const result = digestContract.renderRelationshipDigest(options);
+  assert.ok(result.text.length <= 600);
+  assert.ok(result.metadata.appraisals.included > 0, "an oversized collection must not suppress all beliefs");
+  assert.ok(result.metadata.appraisals.omitted > 0, "this fixture exceeds the budget");
+  assert.equal(result.metadata.appraisals.available, result.metadata.appraisals.included + result.metadata.appraisals.omitted);
+  assert.equal(result.metadata.renderedChars, result.text.length);
+  assert.equal(result.metadata.truncated.length, result.metadata.appraisals.included);
+  assert.ok(!result.text.includes("PRIVATE_OTHER_OBSERVER"));
+  assert.equal(digestContract.relationshipDigest(options), result.text);
+  assert.deepEqual(digestContract.renderRelationshipDigest(options), result);
 });
 
 // --- the estimate and the dispersion -----------------------------------------
@@ -414,20 +477,20 @@ test("observation mode states observations and asserts nothing", async () => {
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
-test("ten runs conclude, with dispersion and not only a mean", async () => {
+test("ten runs allow descriptive summaries with dispersion without asserting conclusions", async () => {
   const { directory, statePath } = await stateWithRuns(10);
   try {
     const answered = await runScript(["--state", statePath, "--json"]);
     assert.equal(answered.code, 0, answered.stderr);
     const report = JSON.parse(answered.stdout);
-    assert.equal(report.status, "conclusive");
-    assert.equal(report.assertsConclusions, true);
+    assert.equal(report.status, "sample-ready");
+    assert.equal(report.assertsConclusions, false);
     assert.equal(report.format, EVAL_FORMAT);
     assert.equal(report.runs.length, 10);
     const group = report.groups[0];
     assert.equal(group.runCount, 10);
     assert.equal(group.sufficient, true);
-    assert.equal(group.observation, null, "a sufficient group reports results, not observations");
+    assert.equal(group.observation, null, "default mode uses the descriptive statistics field");
     for (const name of ["reviewRejectionRate", "refusedActions", "unresolvedDisputeMeanTicks", "injectedDigestCharsMean"]) {
       const value = group.statistics[name];
       assert.equal(value.n, 10, `${name} must report how many runs contributed`);
@@ -653,12 +716,12 @@ test("the report names the fingerprints this build hashes a config with", async 
     assert.equal(report.currentConfig.source, sourceFingerprint());
     assert.equal(report.currentConfig.relationshipVersion, RELATIONSHIP_VERSION);
     const text = renderText(report);
-    assert.match(text, /current config {2}version 1 {2}algorithm [0-9a-f]{12}…/u);
+    assert.match(text, /current config {2}version 2 {2}algorithm [0-9a-f]{12}…/u);
     assert.match(text, /source [0-9a-f]{12}… {2}relationshipVersion 1/u);
     // And the upgrade discontinuity is disclosed where the operator will read it:
     // a change to what the hash covers splits pre-existing manifests from new
     // runs even when the injected bytes are unchanged.
-    assert.ok(report.notes.some((note) => /splits pre-existing manifests/u.test(note)));
+    assert.ok(report.notes.some((note) => /source-only changes/u.test(note)));
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
@@ -745,7 +808,7 @@ test("runs whose models the runtime never reported are pooled with nothing", asy
     assert.ok(!/\bresult\b/u.test(text), "no line may be printed as a result");
   } finally { await rm(directory, { recursive: true, force: true }); }
   // The same ten runs with a model the runtime did report: one group, sufficient,
-  // conclusive. What refused above was the unread models, not the sample size.
+  // descriptive-ready. What refused above was the unread models, not the sample size.
   const directory2 = await mkdtemp(join(tmpdir(), "dcl-eval-models-known-"));
   const statePath2 = join(directory2, "rooms.json");
   try {
@@ -754,8 +817,8 @@ test("runs whose models the runtime never reported are pooled with nothing", asy
     assert.equal(report.groups.length, 1);
     assert.equal(report.groups[0].runCount, 10);
     assert.equal(report.groups[0].modelsKnown, true);
-    assert.equal(report.assertsConclusions, true);
-    assert.equal(report.status, "conclusive");
+    assert.equal(report.assertsConclusions, false);
+    assert.equal(report.status, "sample-ready");
   } finally { await rm(directory2, { recursive: true, force: true }); }
 });
 
@@ -791,7 +854,7 @@ test("a symlinked invocation evaluates rather than exiting 0 with no output", as
     assert.equal(answered.code, 0, answered.stderr);
     assert.notEqual(answered.stdout, "", "a symlinked invocation must actually evaluate");
     const report = JSON.parse(answered.stdout);
-    assert.equal(report.status, "conclusive");
+    assert.equal(report.status, "sample-ready");
     assert.equal(report.runs.length, 10);
     // A genuinely wrong state path stays loud through the same invocation: the
     // failure mode this guard had was "nothing ran, exit 0".
@@ -802,5 +865,26 @@ test("a symlinked invocation evaluates rather than exiting 0 with no output", as
   } finally {
     await rm(directory, { recursive: true, force: true });
     await rm(linkDirectory, { recursive: true, force: true });
+  }
+});
+
+
+test("digest coverage stays exact across budgets, long aliases and Unicode quotations", () => {
+  for (const size of [1, 2, 5, 20]) for (const aliasLength of [1, 120, 700]) {
+    const targets = Array.from({ length: size }, (_, i) => `p${i}`);
+    const options = { observer: "me", labelOf: target => target + "名".repeat(aliasLength),
+      derived: { pairs: targets.map(target => ({ observer: "me", target, counters: { unresolvedDisagreements: 1, messagesAuthored: 2 } })) },
+      appraisals: { me: Object.fromEntries(targets.map(target => [target, { stance: "neutral", confidence: 0.5,
+        evidenceCount: 1, claim: "q" + "😀".repeat(100), perceivedRole: "r".repeat(140) }])) } };
+    const result = digestContract.renderRelationshipDigest(options);
+    assert.ok((result.text?.length ?? 0) <= 600);
+    assert.equal(result.metadata.counters.available, size);
+    assert.equal(result.metadata.appraisals.available, size);
+    assert.equal(result.metadata.omitted.length, result.metadata.counters.omitted + result.metadata.appraisals.omitted);
+    assert.equal(result.metadata.renderedChars, result.text?.length ?? 0);
+    assert.ok(!/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/u.test(result.text ?? ""), "shortening must not split a surrogate pair");
+    const reordered = { ...options, derived: { pairs: [...options.derived.pairs].reverse() },
+      appraisals: { me: Object.fromEntries(Object.entries(options.appraisals.me).reverse()) } };
+    assert.deepEqual(digestContract.renderRelationshipDigest(reordered), result);
   }
 });

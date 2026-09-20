@@ -10,39 +10,30 @@
  * fingerprints this build hashes a config with — the plugin's own fingerprinted
  * source modules.
  *
- * A manifest records the resulting `configHash`, not the terms behind it, so the
- * report prints this build's fingerprint terms as context: two groups whose
- * hashes differ differed in one of them (or in the gate / `appraisalDigest`
- * terms, which depend on the room at the time). Note that a change to *what* the
+ * Current manifests retain the config terms as well as `configHash`; legacy
+ * manifests may carry only the hash. This build's fingerprint is context, not
+ * a reconstruction of a legacy run's settings. A change to *what* the
  * hash covers splits every pre-existing manifest from post-upgrade runs even
  * when the injected bytes are unchanged, so an in-flight experiment has to
  * restart after such an upgrade.
  *
- * Two rules are script behaviour rather than advice, because both were learned
- * the expensive way:
+ * This is a descriptive report, not an estimator of a causal treatment effect.
+ * A run is a manifest-delimited log segment; segments from one room can share
+ * history, and separate rooms do not establish independent assignment either.
+ * No number of segments changes `independence: "unverified"` or authorises a
+ * conclusion. One supplied arm is reported as one supplied arm.
  *
- * - **At least `MIN_RUNS` runs per group before anything is concluded.** With
- *   fewer, the script refuses to state a conclusion: by default it prints the
- *   per-run observations, reports the sample as insufficient, and exits
- *   non-zero. `--observation` switches to the explicit observation-only mode,
- *   which prints descriptive statistics clearly labelled as observations and
- *   still asserts nothing. The threshold cannot be lowered: `--min-runs` may
- *   only raise it. **The gate counts runs that hold a member turn which reached
- *   the member**, not manifest-delimited segments and not constructed
- *   injections: ten `startRun` calls in an idle room are ten restarts, and ten
- *   deliveries the transport refused are ten failures, and neither concludes
- *   anything. The evidence required is a `delivery.settled` reach status for the
- *   same `deliveryId` as the `injection.cost` record; the cost record alone is
- *   appended before the transport call and so exists even for a delivery that
- *   never reached anyone.
- * - **Dispersion, never only a mean.** Every concluded group reports the
- *   sample variance, the standard deviation, the minimum and the maximum beside
- *   the mean, together with how many runs contributed a value.
+ * By default at least `MIN_RUNS` valid segments with reached interactions are
+ * required per group before cross-run summaries are printed. Each outcome also
+ * needs that many observed values: ten deliveries do not imply ten reviews.
+ * `--observation` permits smaller descriptive samples and remains observation
+ * mode at every sample size. `--min-runs` can only raise this reporting threshold.
+ * Every printed mean travels with its n, missingness and sample dispersion.
  *
- * Runs are pooled only when they are genuinely comparable: the pool key is the
- * arm, the injection config hash, the state version and the models actually in
- * use. Two runs whose config hash differs injected different text, so their
- * difference is not the arm's effect; the groups are reported separately.
+ * Pooling matches recorded arm, config hash, state version and models only.
+ * Matching these fields is not proof of comparability or independence. Different
+ * config hashes are kept separate, even when a source-only change produced them.
+ * Unknown models remain unpooled. Invalid measurements are explicitly excluded.
  *
  * Durations are measured in `tick`s, never in `at`. The event stamp `at` is
  * nudged forward once per same-millisecond append to stay strictly increasing,
@@ -54,9 +45,10 @@
  *   node scripts/relationship-eval.mjs [--state <rooms.json>] [--room <id>]
  *                                      [--min-runs <n>] [--observation] [--json]
  *
- * Exits 0 when it stated a conclusion (or ran in observation mode), 1 on a
- * usage or read error, 2 when the state directory holds no run, 3 when the
- * sample is insufficient and conclusions were refused.
+ * Exits 0 when a descriptive report is available, 1 on usage/read errors or a
+ * report with excluded invalid input, 2 when no valid run was found, and 3 when
+ * the default reporting threshold was not met. Exit 0 never means a causal
+ * conclusion or verified independent replication.
  */
 import { readdir } from "node:fs/promises";
 import { realpathSync } from "node:fs";
@@ -64,14 +56,26 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { EventLog, eventLogPath, verifyChain } from "../lib/event-log.js";
-import { MIN_RUNS, DEPENDENT_VARIABLE_VERSION, dependentVariables, dispersion, hasInteraction,
+import { MIN_RUNS, RESET_CONTRACT, DEPENDENT_VARIABLE_VERSION, dependentVariables, dispersion, hasInteraction,
   injectionConfigFor, runSegments } from "../lib/experiment.js";
 
 const USAGE = "usage: node scripts/relationship-eval.mjs [--state <rooms.json>] [--room <roomId>] [--min-runs <n>] [--observation] [--json]";
 export const EVAL_FORMAT = "dsh-chat-local-relationship-eval";
-export const EVAL_VERSION = 1;
-/** The exit code that means "the sample is too small; conclusions were refused". */
+// v2 removes causal/conclusive claims and separates metric coverage from run count.
+export const EVAL_VERSION = 2;
+/** The default descriptive reporting threshold was not met. */
 export const INSUFFICIENT_EXIT = 3;
+
+const SCALAR_METRICS = Object.freeze(["reviewRejectionRate", "refusedActions", "unresolvedDisputes",
+  "unresolvedDisputeMeanTicks", "injectedDigestCharsMean", "injectedTurns"]);
+const nonemptyText = (value) => typeof value === "string" && value.trim().length > 0;
+const nonnegativeInteger = (value) => Number.isSafeInteger(value) && value >= 0;
+
+function validateMinimum(minRuns) {
+  if (!Number.isSafeInteger(minRuns) || minRuns < MIN_RUNS) {
+    throw new Error(`--min-runs may only raise the ${MIN_RUNS}-run gate, never lower it`);
+  }
+}
 
 function parseArgs(argv) {
   const options = { statePath: undefined, roomId: undefined, minRuns: MIN_RUNS, observation: false, json: false };
@@ -88,9 +92,7 @@ function parseArgs(argv) {
       else if (arg === "--room") options.roomId = value;
       else {
         const runs = Number(value);
-        if (!Number.isSafeInteger(runs) || runs < MIN_RUNS) {
-          throw new Error(`--min-runs may only raise the ${MIN_RUNS}-run gate, never lower it\n${USAGE}`);
-        }
+        validateMinimum(runs);
         options.minRuns = runs;
       }
       continue;
@@ -119,9 +121,10 @@ async function roomIdsIn(statePath) {
     .sort();
 }
 
-/** A stable key for the models a run actually used. */
+/** A stable key for the model configuration recorded at an observation. */
 function modelsKey(models) {
-  return JSON.stringify(Object.keys(models).sort().map((member) => [member, models[member].provider, models[member].model]));
+  return JSON.stringify(Object.keys(models).sort().map((member) => [member, models[member].provider,
+    models[member].model, models[member].reasoningEffort ?? null]));
 }
 
 /**
@@ -129,13 +132,13 @@ function modelsKey(models) {
  *
  * `null` is what the writer records when the runtime could not report a member's
  * model, and it is recorded rather than guessed so a reader can see that the
- * model is unknown. The pool key is the thing that has to honour that: it exists
- * to certify that two runs shared every condition, and it cannot certify a
- * condition it never read.
+ * model is unknown. The grouping key can match only recorded conditions; it
+ * cannot establish that two unread model assignments were equal.
  */
 function modelsKnown(models) {
   const members = Object.keys(models ?? {});
-  return members.length > 0 && members.every((member) => models[member]?.provider && models[member]?.model);
+  return members.length > 0 && members.every((member) => nonemptyText(models[member]?.provider)
+    && nonemptyText(models[member]?.model));
 }
 
 /**
@@ -145,11 +148,93 @@ function modelsKnown(models) {
  * such a run is pooled with no other run at all — not with other unknown-model
  * runs either, since "both models are unknown" is not evidence that they were
  * the same. A group of one can never satisfy the `MIN_RUNS` gate, which is the
- * point: an evaluation must not conclude from a condition it could not read.
+ * point: unknown recorded model conditions cannot satisfy descriptive pooling.
  */
 function groupKey(run) {
-  const models = modelsKnown(run.models) ? modelsKey(run.models) : `unread:${run.manifestId}`;
+  const models = modelsKnown(run.models) ? modelsKey(run.models)
+    : JSON.stringify(["unread", run.roomId, run.runIndex, run.manifestId]);
   return JSON.stringify([run.arm, run.configHash, run.initialStateVersion, models]);
+}
+
+function manifestConfig(segment) {
+  return segment.events.find((event) => event.type === "run.manifest" && event.id === segment.manifestId)?.payload?.config;
+}
+
+function contractCoverageFor(segment) {
+  const costs = segment.events.filter((event) => event.type === "injection.cost");
+  if (costs.length === 0) return "no-injections";
+  const config = manifestConfig(segment);
+  return costs.some(({ payload }) => !Object.hasOwn(payload, "configHash")
+    || !Object.hasOwn(payload, "modelAtDelivery")
+    || config?.version >= 2 && (payload.memorySampleStatus === undefined
+      || config.personalMemory?.enabled === true && payload.personalMemoryStatus === undefined))
+    ? "legacy-unverified" : "per-injection-checked";
+}
+
+function combinedCoverage(runs) {
+  if (runs.some((run) => run.contractCoverage === "legacy-unverified")) return "legacy-unverified";
+  return runs.some((run) => run.contractCoverage === "per-injection-checked") ? "per-injection-checked" : "no-injections";
+}
+
+/** Validate the fields the dependent-variable reader would otherwise coerce or skip. */
+function invalidSegmentReason(segment) {
+  if (segment.arm === null) return "run manifest states no arm this version knows";
+  if (!nonemptyText(segment.configHash)) return "run manifest states no config hash";
+  if (!Number.isSafeInteger(segment.initialStateVersion) || segment.initialStateVersion < 1) {
+    return "run manifest states no valid initial state version";
+  }
+  if (!nonnegativeInteger(segment.startedAtTick)) return "run manifest states no valid startedAtTick";
+  const config = manifestConfig(segment);
+  const injectionIds = new Set();
+  for (const event of segment.events) {
+    if (!nonnegativeInteger(event.tick)) return `event ${event.id} has an invalid tick`;
+    const payload = event.payload;
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+      return `event ${event.id} has an invalid payload`;
+    }
+    if (event.type === "injection.cost") {
+      if (!nonnegativeInteger(payload.digestChars) || !nonemptyText(payload.deliveryId)) {
+        return `injection.cost ${event.id} needs a nonnegative integer digestChars and deliveryId`;
+      }
+      if (injectionIds.has(payload.deliveryId)) return `duplicate injection.cost for delivery ${payload.deliveryId}`;
+      if (Object.hasOwn(payload, "configHash") && payload.configHash !== segment.configHash) {
+        return `injection.cost ${event.id} configHash differs from its run manifest`;
+      }
+      if (Object.hasOwn(payload, "modelAtDelivery")) {
+        const model = payload.modelAtDelivery, member = payload.memberSessionId;
+        if (!model || typeof model !== "object" || Array.isArray(model) || !nonemptyText(member)
+          || !Object.hasOwn(segment.models, member)
+          || ![model.provider, model.model].every(value => value === null || nonemptyText(value))
+          || model.reasoningEffort != null && typeof model.reasoningEffort !== "string") {
+          return `injection.cost ${event.id} has an invalid before-delivery model observation`;
+        }
+        if (modelsKey({ [member]: model }) !== modelsKey({ [member]: segment.models[member] })) {
+          return `injection.cost ${event.id} modelAtDelivery differs from its run manifest`;
+        }
+      }
+      if (config?.version >= 2 && payload.memorySampleStatus === "unavailable") {
+        return `injection.cost ${event.id} memory sample was unavailable`;
+      }
+      if (config?.version >= 2 && config.personalMemory?.enabled === true && payload.personalMemoryStatus === "partial") {
+        return `injection.cost ${event.id} enabled personal memory was only partially available`;
+      }
+      injectionIds.add(payload.deliveryId);
+    }
+    if (event.type === "delivery.settled" && (!nonemptyText(payload.deliveryId)
+      || !["queued", "sent", "delivered", "working", "replied", "passed", "failed", "superseded"].includes(payload.status))) {
+      return `delivery.settled ${event.id} has an invalid deliveryId or status`;
+    }
+    if (event.type === "ledger.transition") {
+      if (!nonemptyText(payload.entryId)) return `ledger.transition ${event.id} has no entryId`;
+      if (payload.verdict != null && !["approve", "request_changes"].includes(payload.verdict)) {
+        return `ledger.transition ${event.id} has an unknown review verdict`;
+      }
+      if (payload.kind === "dispute" && !nonemptyText(payload.status)) {
+        return `dispute ${event.id} has no status`;
+      }
+    }
+  }
+  return null;
 }
 
 /** Read every run the state directory holds, and everything that is not one. */
@@ -182,12 +267,13 @@ async function collectRuns(statePath, only, log = new EventLog(statePath)) {
       continue;
     }
     for (const [position, segment] of segments.entries()) {
-      if (segment.arm === null) { invalid.push({ roomId, reason: "run manifest states no arm this version knows" }); continue; }
-      if (segment.configHash === null) { invalid.push({ roomId, reason: "run manifest states no config hash" }); continue; }
+      const reason = invalidSegmentReason(segment);
+      if (reason) { invalid.push({ roomId, runIndex: position, manifestId: segment.manifestId, reason }); continue; }
       const values = dependentVariables({ events: segment.events, roomId });
       runs.push({ roomId, runIndex: position, manifestId: segment.manifestId, arm: segment.arm,
         configHash: segment.configHash, initialStateVersion: segment.initialStateVersion,
         startedAtTick: segment.startedAtTick, tickEnd: segment.tickEnd, models: segment.models,
+        contractCoverage: contractCoverageFor(segment),
         modelsKnown: modelsKnown(segment.models),
         chain: chain.ok, analysable: hasInteraction(values), dependentVariables: values });
     }
@@ -201,40 +287,74 @@ function handoffShares(runs, members) {
   for (const run of runs) {
     const total = run.dependentVariables.handoffSelectionTotal;
     for (const member of members) {
-      shares.get(member).push(total === 0 ? 0 : (run.dependentVariables.handoffSelection[member] ?? 0) / total);
+      // No choice was made, so a share is undefined, not evidence of zero share.
+      shares.get(member).push(total === 0 ? null : (run.dependentVariables.handoffSelection[member] ?? 0) / total);
     }
   }
   return shares;
 }
 
 /** The pooled distribution and the per-member share dispersion of one group. */
-function handoffStatistics(runs, members) {
+function handoffStatistics(runs, members, minRuns, observation) {
   const pooled = {};
+  const observed = runs.filter((run) => run.dependentVariables.handoffSelectionTotal > 0).length;
   for (const member of members) {
-    pooled[member] = runs.reduce((total, run) => total + (run.dependentVariables.handoffSelection[member] ?? 0), 0);
+    pooled[member] = observation || observed >= minRuns
+      ? runs.reduce((total, run) => total + (run.dependentVariables.handoffSelection[member] ?? 0), 0) : null;
   }
   const shares = handoffShares(runs, members);
   const byMember = {};
-  for (const member of members) byMember[member] = dispersion(shares.get(member));
+  for (const member of members) byMember[member] = describeColumn(shares.get(member), minRuns, observation);
   return { pooled, byMember };
 }
 
-/** The scalars one group's runs report, each with its cross-run dispersion. */
-function statisticsFor(runs) {
-  const members = [...new Set(runs.flatMap((run) => Object.keys(run.models)))].sort();
-  const column = (key) => dispersion(runs.map((run) => run.dependentVariables[key]));
-  return {
-    reviewRejectionRate: column("reviewRejectionRate"),
-    refusedActions: column("refusedActions"),
-    unresolvedDisputes: column("unresolvedDisputes"),
-    unresolvedDisputeMeanTicks: column("unresolvedDisputeMeanTicks"),
-    injectedDigestCharsMean: column("injectedDigestCharsMean"),
-    injectedTurns: column("injectedTurns"),
-    handoffSelection: handoffStatistics(runs, members)
-  };
+/** A metric's usable values, with a reporting gate distinct from the run gate. */
+function coverageOf(values, minRuns) {
+  const observedN = values.filter(Number.isFinite).length;
+  return { observedN, missingN: values.length - observedN, requiredN: minRuns,
+    thresholdMet: observedN >= minRuns, independentN: null };
 }
 
-/** One group's report: its pool key, its runs, and whether it may conclude. */
+function describeColumn(values, minRuns, observation) {
+  const coverage = coverageOf(values, minRuns);
+  if (!observation && !coverage.thresholdMet) {
+    return { n: coverage.observedN, missing: coverage.missingN, mean: null, variance: null,
+      sd: null, min: null, max: null, coverage, withheld: true };
+  }
+  return { ...dispersion(values), coverage, withheld: false };
+}
+
+/** The scalars one group's runs report, each with its cross-run dispersion. */
+function statisticsFor(runs, minRuns, observation) {
+  const members = [...new Set(runs.flatMap((run) => [
+    ...Object.keys(run.models), ...Object.keys(run.dependentVariables.handoffSelection)
+  ]))].sort();
+  const statistics = Object.fromEntries(SCALAR_METRICS.map((key) =>
+    [key, describeColumn(runs.map((run) => run.dependentVariables[key]), minRuns, observation)]));
+  statistics.handoffSelection = handoffStatistics(runs, members, minRuns, observation);
+  return statistics;
+}
+
+function metricCoverage(runs, minRuns) {
+  const result = Object.fromEntries(SCALAR_METRICS.map((key) =>
+    [key, coverageOf(runs.map((run) => run.dependentVariables[key]), minRuns)]));
+  result.handoffSelection = coverageOf(runs.map((run) =>
+    run.dependentVariables.handoffSelectionTotal > 0 ? run.dependentVariables.handoffSelectionTotal : null), minRuns);
+  return result;
+}
+
+/** Observed clustering is not a count of independently assigned experimental units. */
+function continuityOf(runs) {
+  const rooms = new Map();
+  for (const run of runs) rooms.set(run.roomId, (rooms.get(run.roomId) ?? 0) + 1);
+  return { unit: "manifest-delimited room segment", roomCount: rooms.size,
+    segmentsByRoom: [...rooms].sort(([a], [b]) => a.localeCompare(b))
+      .map(([roomId, segments]) => ({ roomId, segments })),
+    hasRepeatedRoomSegments: [...rooms.values()].some((count) => count > 1),
+    independentRunCount: null };
+}
+
+/** One group's descriptive eligibility and outcome-specific coverage. */
 function groupsOf(runs, minRuns, observation) {
   const buckets = new Map();
   for (const run of runs) {
@@ -251,23 +371,27 @@ function groupsOf(runs, minRuns, observation) {
     // statistics are read from the runs that carry the interaction, so a stray
     // restart that added no data cannot move a mean either.
     const analysable = bucket.filter((run) => run.analysable);
-    const sufficient = analysable.length >= minRuns;
     const first = bucket[0];
     const known = modelsKnown(first.models);
+    const sufficient = known && analysable.length >= minRuns;
     const group = { arm: first.arm, configHash: first.configHash, initialStateVersion: first.initialStateVersion,
       modelsKey: modelsKey(first.models), models: first.models, modelsKnown: known, runCount: bucket.length,
       poolId: groupKey(first),
       analysableRunCount: analysable.length, sufficient,
+      sampleReadiness: sufficient ? "sample-ready" : "insufficient-sample",
+      contractCoverage: combinedCoverage(bucket),
+      comparison: "descriptive-only", independence: "unverified", assertsConclusions: false,
+      continuity: continuityOf(analysable), metricCoverage: metricCoverage(analysable, minRuns),
       runIndexes: bucket.map((run) => ({ roomId: run.roomId, runIndex: run.runIndex, analysable: run.analysable })),
-      statistics: sufficient ? statisticsFor(analysable) : null,
-      observation: !sufficient && observation && analysable.length > 0 ? statisticsFor(analysable) : null };
+      statistics: sufficient && !observation ? statisticsFor(analysable, minRuns, false) : null,
+      observation: observation && analysable.length > 0 ? statisticsFor(analysable, minRuns, true) : null };
     if (!sufficient) {
-      // The reason a group cannot conclude says which gate stopped it. A group of
+      // The reason a group lacks default summaries says which gate stopped it. A group of
       // one exists because its models are unknown, and the ten-run count is then
       // not what an operator needs to hear: no sample size could fix it.
       group.insufficientReason = !known
-        ? "this run's models are unknown, so it is pooled with no other run; the runtime must report every member's provider and model before any conclusion"
-        : `this group holds ${analysable.length} run(s) with an interaction; ${minRuns} are required before it states anything`;
+        ? "this run's models are unknown, so it is pooled with no other run; matching provider/model conditions are unverified"
+        : `this group holds ${analysable.length} run(s) with an interaction; ${minRuns} are required for default descriptive summaries`;
     }
     groups.push(group);
   }
@@ -284,34 +408,49 @@ function number(value, digits = 3) {
 /** The whole evaluation as one plain value. */
 export async function evaluate({ statePath, roomId, minRuns = MIN_RUNS, observation = false },
   log = new EventLog(statePath)) {
+  validateMinimum(minRuns);
   const { runs, skipped, invalid } = await collectRuns(statePath, roomId, log);
   const groups = groupsOf(runs, minRuns, observation);
-  const concluded = groups.filter((group) => group.sufficient);
-  const status = concluded.length > 0 ? "conclusive" : (observation ? "observation" : "insufficient-sample");
-  // The fingerprint terms this build hashes a config with. A manifest records
-  // only the resulting `configHash`, so these are the context an operator needs
-  // to see *why* two groups' hashes differ — and to recognise an upgrade that
-  // changed what the hash covers while the injected bytes stayed the same.
+  const ready = groups.filter((group) => group.sufficient);
+  const status = observation ? "observation" : ready.length > 0 ? "sample-ready" : "insufficient-sample";
+  const armsSupplied = [...new Set(runs.map((run) => run.arm))].sort();
   const config = injectionConfigFor({});
   const currentConfig = { version: config.version, algorithm: config.algorithm,
     source: config.source, relationshipVersion: config.relationshipVersion };
   const notes = [
-    "Runs are pooled only when arm, injection config hash, state version and models all match.",
-    "A run whose models the runtime did not report (`null` provider/model) is pooled with no other run at all, unknown-model runs included: the pool key certifies comparability, and \"both models are unknown\" is not evidence that they were the same. Such a run can never reach the gate, so no conclusion is drawn from a condition the evaluation could not read.",
-    `Only runs holding an interaction count toward the ${minRuns}-run gate: an interaction is an injection whose delivery reached the member (a \`delivery.settled\` reach status for the same \`deliveryId\`). A manifest-delimited segment in which no member turn was ever reached is a restart, and a run whose every delivery failed holds constructed injections and no member turn at all; neither states anything.`,
+    "Descriptive only: sample-ready means the reporting count threshold was met, never a causal effect, significance finding or independent replication.",
+    "Runs are pooled only when recorded arm, injection config hash, state version and models all match; matching recorded fields does not establish exchangeability or treatment assignment.",
+    "Model configuration is observed at the manifest and before each recorded delivery, including reasoning effort when known. Matching observations do not prove constant runtime settings during token generation.",
+    "A run with unknown provider/model is pooled with no other run, including other unknown-model runs. Both models being unknown is not evidence that they match.",
+    `Only valid runs holding a reached interaction count toward the ${minRuns}-run descriptive gate. A bare injection.cost, an empty restart or failed transport is not a reached interaction.`,
+    "Runs are manifest-delimited room segments. Segments from the same room can share history; room counts and segment counts do not establish independent experimental units. Independent n is unknown.",
+    "Reset changes plugin C/A/personal memory overlays only. Native runtime context is not purged and shared room conversation persists; the reset arm is not an independent or memory-free counterfactual.",
+    "Coverage is outcome-specific: reviews, handoff shares and dispute durations are missing when their denominators are absent, not zero. Below-threshold outcomes are withheld by default and shown only with --observation.",
     "Every duration is measured in ticks, never in the event stamp `at`.",
-    "A group reports sample variance (n-1) and is `null` for a single run.",
-    `A manifest records the resulting configHash, not the terms behind it; the current config fingerprints are printed above. A change to what the hash covers splits pre-existing manifests from post-upgrade runs even when the injected bytes are unchanged, so an in-flight experiment must restart after such an upgrade.`
+    "Variance uses n-1 and is null for one observed value. It describes dispersion, not uncertainty under verified independent sampling.",
+    "Current manifests retain config terms; legacy manifests may record only configHash. Different hashes stay separate, including source-only changes; the displayed current build fingerprint cannot reconstruct missing past configuration."
   ];
-  if (concluded.length === 0 && runs.length > 0) {
-    notes.push(observation
-      ? `Observation only: no group holds ${minRuns} runs with an interaction, so these statistics are descriptive and no conclusion is asserted.`
-      : `Refused: no group holds ${minRuns} runs with an interaction. Re-run with --observation to print descriptive statistics labelled as observations.`);
+  if (armsSupplied.length < 2) notes.push("Single arm: the supplied data contain no between-arm comparison.");
+  else notes.push("Multiple arms supplied: they are described separately. No randomisation, paired design, independence or causal contrast is inferred from their presence.");
+  if (observation) notes.push("Observation only at every sample size: descriptive summaries are allowed below the reporting threshold and no conclusion is asserted.");
+  else if (ready.length === 0 && runs.length > 0) {
+    notes.push(`Refused: no group holds ${minRuns} valid runs with an interaction. Re-run with --observation to print descriptive statistics labelled as observations.`);
+  }
+  if (invalid.length > 0) notes.push("Invalid input was excluded and is listed in invalid. This is a partial report, not a clean dataset validation.");
+  if (runs.some((run) => run.contractCoverage === "legacy-unverified")) {
+    notes.push("Legacy injection.cost records lack per-injection configuration, runtime-model or memory availability coverage. Their within-run configuration is unverified; descriptive acceptance does not certify configuration constancy or a fully delivered memory treatment.");
   }
   return { format: EVAL_FORMAT, version: EVAL_VERSION,
     dependentVariableVersion: DEPENDENT_VARIABLE_VERSION,
     state: statePath, requiredRuns: minRuns, status,
-    currentConfig, assertsConclusions: concluded.length > 0, runs, skipped, invalid, groups, notes };
+    mode: observation ? "observation" : "thresholded-descriptive",
+    comparison: "descriptive-only", independence: "unverified", assertsConclusions: false,
+    resetContract: { ...RESET_CONTRACT },
+    dataQuality: invalid.length > 0 ? "partial" : "complete",
+    contractCoverage: combinedCoverage(runs),
+    groupsSupplied: groups.length, groupsSampleReady: ready.length, armsSupplied,
+    singleArm: armsSupplied.length === 1, continuity: continuityOf(runs.filter((run) => run.analysable)),
+    currentConfig, runs, skipped, invalid, groups, notes };
 }
 
 /** One line per run, then one block per group. */
@@ -319,6 +458,9 @@ export function renderText(report) {
   const lines = [];
   lines.push(`relationship evaluation — ${report.state}`);
   lines.push(`runs ${report.runs.length}   required per group ${report.requiredRuns}   status ${report.status}`);
+  lines.push(`comparison ${report.comparison}   independence ${report.independence}   data ${report.dataQuality}`);
+  lines.push(`groups supplied ${report.groupsSupplied}   arms ${report.armsSupplied.join(", ") || "none"}   independent n unknown`);
+  lines.push(`reset scope ${report.resetContract.resetScope}   native context reset ${report.resetContract.runtimeContextReset}   shared conversation reset ${report.resetContract.sharedConversationReset}`);
   if (report.currentConfig) {
     const config = report.currentConfig;
     lines.push(`current config  version ${config.version}  algorithm ${String(config.algorithm).slice(0, 12)}…  `
@@ -348,28 +490,33 @@ export function renderText(report) {
       : "unknown (not pooled with any other run)";
     lines.push(`group arm=${group.arm} configHash=${group.configHash.slice(0, 12)}… stateVersion=${group.initialStateVersion}`);
     lines.push(`  models ${models}`);
-    lines.push(`  runs ${group.runCount} (${group.analysableRunCount} with an interaction)${group.sufficient ? " (sufficient)" : ` — ${group.insufficientReason}`}`);
+    lines.push(`  runs ${group.runCount} (${group.analysableRunCount} with an interaction) — ${group.sampleReadiness}`);
+    lines.push(`  room clusters ${group.continuity.roomCount}   repeated room segments ${group.continuity.hasRepeatedRoomSegments}   independence unverified`);
+    lines.push(`  configuration coverage ${group.contractCoverage}`);
+    if (!group.sufficient) lines.push(`  ${group.insufficientReason}`);
+    for (const [name, coverage] of Object.entries(group.metricCoverage)) {
+      lines.push(`  coverage ${name} observed n ${coverage.observedN} missing ${coverage.missingN} required ${coverage.requiredN} independent n unknown`);
+    }
     if (!stats) {
       // A group of one whose models are unknown has no statistics because the
-      // pool key refused to certify it, not because it holds no interaction.
+      // grouping key could not match its models, not because it holds no interaction.
       lines.push(!group.modelsKnown
         ? "  no statistics: this run's models are unknown, so it stands alone and cannot reach the gate"
         : group.analysableRunCount === 0
           ? "  no statistics: this group's runs hold no interaction to analyse"
-          : "  no statistics: a conclusion needs more runs than this group holds");
+          : "  no statistics: default descriptive summaries need more runs than this group holds");
       continue;
     }
-    const label = group.statistics ? "result" : "observation (not a conclusion)";
-    for (const name of ["reviewRejectionRate", "refusedActions", "unresolvedDisputes",
-      "unresolvedDisputeMeanTicks", "injectedDigestCharsMean", "injectedTurns"]) {
+    const label = group.statistics ? "descriptive (not a conclusion)" : "observation (not a conclusion)";
+    for (const name of SCALAR_METRICS) {
       const value = stats[name];
-      lines.push(`  ${label}  ${name.padEnd(28)} mean ${number(value.mean)}  sd ${number(value.sd)}  variance ${number(value.variance)}  min ${number(value.min)}  max ${number(value.max)}  n ${value.n} missing ${value.missing}`);
+      lines.push(`  ${label}  ${name.padEnd(28)} mean ${number(value.mean)}  sd ${number(value.sd)}  variance ${number(value.variance)}  min ${number(value.min)}  max ${number(value.max)}  n ${value.n} missing ${value.missing}${value.withheld ? " (withheld: outcome below threshold)" : ""}`);
     }
     const handoff = stats.handoffSelection;
     lines.push(`  ${label}  handoffSelection (pooled counts, then each member's per-run share)`);
     for (const member of Object.keys(handoff.pooled).sort()) {
       const share = handoff.byMember[member];
-      lines.push(`      ${member.padEnd(24)} pooled ${String(handoff.pooled[member]).padStart(4)}  share mean ${number(share.mean)}  sd ${number(share.sd)}  variance ${number(share.variance)}`);
+      lines.push(`      ${member.padEnd(24)} pooled ${number(handoff.pooled[member], 0).padStart(4)}  share mean ${number(share.mean)}  sd ${number(share.sd)}  variance ${number(share.variance)}  n ${share.n} missing ${share.missing}${share.withheld ? " (withheld: outcome below threshold)" : ""}`);
     }
   }
   for (const note of report.notes) lines.push(`note: ${note}`);
@@ -410,8 +557,12 @@ async function main() {
   else process.stdout.write(renderText(report));
   if (report.status === "insufficient-sample") {
     const withInteraction = report.runs.filter((run) => run.analysable).length;
-    process.stderr.write(`relationship-eval: ${report.runs.length} run(s) found, ${withInteraction} holding an interaction; at least ${report.requiredRuns} are required per group before any conclusion. Pass --observation to print observations only.\n`);
+    process.stderr.write(`relationship-eval: ${report.runs.length} run(s) found, ${withInteraction} holding an interaction; at least ${report.requiredRuns} are required per group for default descriptive summaries. Pass --observation to print observations only.\n`);
     return INSUFFICIENT_EXIT;
+  }
+  if (report.invalid.length > 0) {
+    process.stderr.write(`relationship-eval: ${report.invalid.length} invalid input(s) excluded; partial descriptive report only.\n`);
+    return 1;
   }
   return 0;
 }

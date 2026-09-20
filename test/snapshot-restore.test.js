@@ -50,11 +50,11 @@ async function waitFor(predicate, label = "condition") {
  * same values a plain property would.
  */
 function watchRestoreWindow(service, previous, { afterSwap, atRestoreAwait } = {}) {
-  let internal = service.saveTail;
+  let internal = service.journal.writeTail;
   let tailReads = 0;
   let wroteTail = false;
   let awaited = false;
-  Object.defineProperty(service, "saveTail", {
+  Object.defineProperty(service.journal, "writeTail", {
     configurable: true,
     get() {
       if (awaited || typeof atRestoreAwait !== "function" || service.state.rooms[0] === previous) return internal;
@@ -362,22 +362,22 @@ test("a restore whose save fails leaves memory exactly as it was", async () => {
   // under-describes `rooms.json` forever.
   let releaseSave;
   const held = new Promise((resolve) => { releaseSave = resolve; });
-  service.saveTail = held;
+  service.journal.writeTail = held;
   const producing = service.setRoomPolicy(room.id, { defaultActionMode: "read_only_audit",
     expectedRevision: previous.policy.revision, gate: true });
   producing.catch(() => {});
-  await waitFor(() => service.saveTail !== held, "the producer's save to claim and park");
+  await waitFor(() => service.journal.writeTail !== held, "the producer's save to claim and park");
   const beforeMessages = (await service.messages(room.id)).map((message) => message.text);
   // One entry the restore's own save will claim, and therefore has to re-queue
   // when its write fails. Queued in the queue's own shape, like every producer.
   const probe = { id: crypto.randomUUID() };
-  service.pendingAudit.push({ room: previous,
+  service.journal.pendingAudits.push({ room: previous,
     build: () => ({ type: "probe.requeued", actor: { kind: "system", id: "system:probe" },
       payload: { id: probe.id }, provenance: { originClass: "system", sessionKind: "interactive" } }),
     stillValid: () => true });
   const restoring = service.restoreFromSnapshot(snapshot, { confirm: true });
   restoring.catch(() => {});
-  await waitFor(() => service.pendingLogReplace.size > 0, "the restore's replace gate");
+  await waitFor(() => service.journal.replacements.size > 0, "the restore's replace gate");
   // The restore's write is failed for real, at the filesystem, the instant the
   // producer's write has landed and published its flush — after that write and
   // before the restore's own body runs. Its temp file is pinned by stubbing the
@@ -388,14 +388,14 @@ test("a restore whose save fails leaves memory exactly as it was", async () => {
   const temporary = `${statePath}.${PINNED_TEMP}.tmp`;
   let durable = null;
   let durableIno = null;
-  let flush = service.auditFlush;
+  let flush = service.journal.auditFlush;
   const realRandomUUID = crypto.randomUUID;
-  Object.defineProperty(service, "auditFlush", {
+  Object.defineProperty(service.journal, "auditFlush", {
     configurable: true,
     get() { return flush; },
     set(value) {
       flush = value;
-      if (durable !== null || service.pendingLogReplace.size === 0) return;
+      if (durable !== null || service.journal.replacements.size === 0) return;
       durable = readFileSync(statePath, "utf8");
       durableIno = statSync(statePath).ino;
       crypto.randomUUID = () => PINNED_TEMP;
@@ -477,9 +477,9 @@ test("a legitimate save claimed in a restore's swap→bump window is still audit
         policyRevision: live.policy.revision, mentions: [], deliveries: [], text: "窗口内的持久变更" };
       live.messages.push(notice);
       discarded = { id: crypto.randomUUID() };
-      service.pendingAudit.push({ room: live, build: () => messageCreated(notice),
+      service.journal.pendingAudits.push({ room: live, build: () => messageCreated(notice),
         stillValid: () => live.messages.some((item) => item.id === notice.id) });
-      service.pendingAudit.push({ room: previous,
+      service.journal.pendingAudits.push({ room: previous,
         build: () => ({ type: "probe.discarded", actor: { kind: "system", id: "system:probe" },
           payload: { id: discarded.id }, provenance: { originClass: "system", sessionKind: "interactive" } }),
         stillValid: () => true });
@@ -583,7 +583,7 @@ test("a failed-write audit re-queued across a restore does not leak into the rep
   const held = new Promise((resolve, reject) => { failWrite = reject; });
   let internal = held;
   let fired = false;
-  Object.defineProperty(service, "saveTail", {
+  Object.defineProperty(service.journal, "writeTail", {
     configurable: true,
     get() { return internal; },
     set(value) {
@@ -634,7 +634,7 @@ test("two restores of one room are serialised, so the mutual wait cannot form", 
   await service.send({ roomId: room.id, author: "human:me", authorKind: "human", text: "一" });
   const snapshot = JSON.parse((await service.snapshotRun(room.id, "cfg")).content);
   const live = service.state.rooms[0];
-  const registry = service.pendingLogReplace;
+  const registry = service.journal.replacements;
   const open = registry.open.bind(registry);
   let maxInFlight = 0;
   registry.open = (roomId) => {
@@ -648,19 +648,19 @@ test("two restores of one room are serialised, so the mutual wait cannot form", 
     stillValid: () => true });
   let releaseSave;
   const held = new Promise((resolve) => { releaseSave = resolve; });
-  service.saveTail = held;
-  service.pendingAudit.push(claim("first"));
+  service.journal.writeTail = held;
+  service.journal.pendingAudits.push(claim("first"));
   const first = service.restoreFromSnapshot(snapshot, { confirm: true });
   first.catch(() => {});
-  await waitFor(() => service.pendingLogReplace.size === 1, "the first restore's replace");
-  service.pendingAudit.push(claim("second"));
+  await waitFor(() => service.journal.replacements.size === 1, "the first restore's replace");
+  service.journal.pendingAudits.push(claim("second"));
   const second = service.restoreFromSnapshot(snapshot, { confirm: true });
   second.catch(() => {});
   // On a tree without the per-room lock the second restore swaps and claims here;
   // with it, the second restore is parked and has opened nothing.
   await new Promise((resolve) => setTimeout(resolve, 20));
   assert.equal(maxInFlight, 1, "two log replaces were in flight for one room at once");
-  assert.equal(service.pendingLogReplace.size, 1, "only the running restore's replace is in flight");
+  assert.equal(service.journal.replacements.size, 1, "only the running restore's replace is in flight");
   releaseSave();
   const settled = await Promise.allSettled([first, second]);
   const statuses = settled.map((result) => result.status);
@@ -688,17 +688,17 @@ test("a log replace is dropped from the registry before its waiters resume", asy
   const snapshot = JSON.parse((await service.snapshotRun(room.id, "cfg")).content);
   let releaseSave;
   const held = new Promise((resolve) => { releaseSave = resolve; });
-  service.saveTail = held;
+  service.journal.writeTail = held;
   const restoring = service.restoreFromSnapshot(snapshot, { confirm: true });
-  await waitFor(() => service.pendingLogReplace.get(room.id), "the restore's replace");
-  const replace = service.pendingLogReplace.get(room.id);
+  await waitFor(() => service.journal.replacements.get(room.id), "the restore's replace");
+  const replace = service.journal.replacements.get(room.id);
+  assert.deepEqual(Object.keys(replace).sort(), ["promise", "roomId"], "replacement waiters must never receive its resolver");
   let observed = "the replace never resolved";
-  void replace.promise.then(() => { observed = service.pendingLogReplace.get(room.id); });
+  void replace.promise.then(() => { observed = service.journal.replacements.get(room.id); });
   releaseSave();
   await restoring;
   assert.equal(observed, null,
     "the replace was still registered when it resolved, so a flush that re-looks-up would wait on it again forever");
-  assert.equal(service.pendingLogReplace.size, 0, "a log replace was left registered");
+  assert.equal(service.journal.replacements.size, 0, "a log replace was left registered");
   await service.close();
 });
-

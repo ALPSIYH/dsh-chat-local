@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { Readable } from "node:stream";
 import { DshChatLocalService } from "../lib/room-store.js";
 import { apply } from "../lib/index.js";
+import * as memoryContract from "../lib/relationship.js";
 import { RELATIONSHIP_VERSION, RELATIONSHIP_IGNORED_EVENT_TYPES, deriveRelationships, latestRelationships, effectiveAppraisals, sortEvents } from "../lib/relationship.js";
 import { RUN_MANIFEST_EVENT_TYPE, INJECTION_COST_EVENT_TYPE } from "../lib/experiment.js";
 
@@ -1363,4 +1364,59 @@ test("an appraisal from another room never leaks into this room's projection", (
   const own = effectiveAppraisals(log(), ROOM, 8);
   const mixed = effectiveAppraisals([...log(), ...foreign], ROOM, 8);
   assert.deepEqual(mixed, own);
+});
+
+
+// The versioned memory contract keeps legacy counter-only resets readable.
+function fullMemoryReset({ id = "reset-all", tick = 5, at = 10, targetId = null } = {}) {
+  const reset = interventionEvent({ id, tick, at, targetId });
+  reset.payload.memoryVersion = 2;
+  reset.payload.memoryScope = "all";
+  return reset;
+}
+
+test("full-memory reset closes prior facts and beliefs but preserves audit history and later beliefs", () => {
+  const before = appraisalEvent({ id: "belief-before", tick: 5, at: 9, observerId: "o1", aboutAgentId: "o2", claim: "old" });
+  const reset = fullMemoryReset();
+  const base = [membersEvent(), message({ id: "speech", author: "o2", tick: 4, at: 8 }), before, reset];
+  const original = JSON.stringify(base);
+  assert.deepEqual(effectiveAppraisals(base, ROOM, 5), {}, "the prior belief is outside the new memory window");
+  assert.equal(countersFor(deriveRelationships({ events: base, roomId: ROOM }), "o1", "o2").messagesAuthored, 0);
+  const later = appraisalEvent({ id: "belief-after", tick: 5, at: 11, observerId: "o1", aboutAgentId: "o2", claim: "new" });
+  assert.equal(effectiveAppraisals([...base, later], ROOM, 5).o1.o2.claim, "new");
+  assert.equal(JSON.stringify(base), original, "reset must never rewrite an earlier appraisal");
+});
+
+test("legacy resets stay counter-only, and full-memory resets obey room, target and horizon", () => {
+  const own = appraisalEvent({ id: "own", tick: 2, observerId: "o1", aboutAgentId: "o2" });
+  const other = appraisalEvent({ id: "other", tick: 2, observerId: "o2", aboutAgentId: "r1" });
+  const oldReset = interventionEvent({ id: "legacy", tick: 3 });
+  assert.equal(effectiveAppraisals([own, oldReset], ROOM, 3).o1.o2.appraisalId, "own");
+  const reset = fullMemoryReset({ tick: 3, targetId: "o2" });
+  assert.deepEqual(effectiveAppraisals([own, other, reset], ROOM, 3), { o2: { r1: effectiveAppraisals([other], ROOM, 3).o2.r1 } });
+  assert.equal(effectiveAppraisals([own, reset], ROOM, 2).o1.o2.appraisalId, "own");
+  assert.equal(effectiveAppraisals([own, { ...reset, provenance: { roomId: OTHER_ROOM } }], ROOM, 3).o1.o2.appraisalId, "own");
+});
+
+test("coherent memory sampling is deterministic and revocation cannot resurrect a reset belief", () => {
+  const before = appraisalEvent({ id: "belief", tick: 2, observerId: "o1", aboutAgentId: "o2" });
+  const reset = fullMemoryReset({ tick: 3 });
+  const events = [membersEvent(), before, reset];
+  assert.equal(typeof memoryContract.sampleRelationshipMemory, "function");
+  const sample = memoryContract.sampleRelationshipMemory({ events, roomId: ROOM, asOfTick: 3 });
+  assert.equal(sample.memoryVersion, 2);
+  assert.deepEqual(sample.appraisals, {});
+  assert.deepEqual(sample, memoryContract.sampleRelationshipMemory({ events: [...events].reverse(), roomId: ROOM, asOfTick: 3 }));
+  assert.equal(memoryContract.revocableAppraisal(events, ROOM, "o1", "o2", 3), null);
+});
+
+
+test("an unrecognized reset scope or version never silently revokes a belief", () => {
+  const appraisal = appraisalEvent({ id: "old", tick: 1, observerId: "o1", aboutAgentId: "o2" });
+  for (const fields of [{ memoryScope: "all" }, { memoryScope: "all", memoryVersion: 3 },
+    { memoryScope: "counters", memoryVersion: 2 }, { memoryScope: "unknown", memoryVersion: 2 }]) {
+    const reset = interventionEvent({ id: "reset", tick: 2 });
+    Object.assign(reset.payload, fields);
+    assert.equal(effectiveAppraisals([appraisal, reset], ROOM, 2).o1.o2.appraisalId, "old");
+  }
 });

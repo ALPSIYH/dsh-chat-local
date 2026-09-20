@@ -88,13 +88,11 @@ async function harness(roomName = "行动治理门") {
 const exec = (name, args = {}) => ({ name, arguments: args, agent: { session: { id: "s1" } } });
 
 /**
- * What the guard and the room did before the gate existed, captured by running
- * this exact scenario — same state layout, same messages, same tool calls —
- * against the implementation without the gate. A room identifier and a message
- * identifier are fresh UUIDs on every run, so the recorded prompt is compared
- * after replacing every UUID with `{id}`.
+ * Exact guard decisions retained from the pre-gate baseline. The memory refactor
+ * intentionally adds personal-recall instructions and an observation receipt;
+ * their separate prompt/event baselines below describe the current contract.
  */
-const PRE_GATE_OUTCOMES = [
+const GATE_OFF_OUTCOMES = [
   ["bash", "allow"],
   ["write_file", "allow"],
   ["read", "allow"],
@@ -107,17 +105,16 @@ const PRE_GATE_OUTCOMES = [
   ["restricted chat_relationships", "allow"],
 ];
 /**
- * The exact sequence a gate-off turn records. This is the gate's own contract
- * ("with the gate off nothing about the turn changes"), so the one entry the
- * gate never writes — `injection.cost`, the cost record every delivery now
- * appends beside `turn.prompt`, independent of the gate — is part of the
- * baseline rather than filtered out: the assertion is that the sequence is
- * exactly this, and that no `action_gate` appears in it.
+ * Exact post-refactor gate-off baseline. Personal memory adds one receipt before
+ * the delivered transition finishes and a 100-character chat_identity/chat_recall paragraph
+ * to each prompt. Removing just that paragraph reproduces both old hashes.
+ * UUID normalization is the only transformation used in the actual assertions;
+ * neither extra event types nor unexpected prompt changes are filtered out.
  */
-const PRE_GATE_EVENT_TYPES = ["member.added", "message.created", "message.created", "turn.scheduled", "relationship.snapshot", "turn.prompt", "injection.cost", "delivery.settled", "message.created", "turn.scheduled", "relationship.snapshot", "turn.prompt", "injection.cost", "delivery.sent", "delivery.settled"];
-const PRE_GATE_PROMPTS = [
-  { chars: 2734, sha256: "d65a9d95a7eba27eca99c99b04150b98d7ece00ed8002bed81293ff21804ee6b" },
-  { chars: 2790, sha256: "e20db3c20c9da0065fe984ea264a43de409f438f452f5a5ad42fa877256e4f1b" },
+const MEMORY_GATE_OFF_EVENT_TYPES = ["member.added", "message.created", "message.created", "turn.scheduled", "relationship.snapshot", "turn.prompt", "injection.cost", "delivery.settled", "message.created", "turn.scheduled", "relationship.snapshot", "turn.prompt", "injection.cost", "delivery.sent", "memory.observed", "delivery.settled"];
+const MEMORY_GATE_OFF_PROMPTS = [
+  { chars: 2834, sha256: "bae97481c262db9ef527969584d8634bd574e44904eff1f2349e9930859b8911" },
+  { chars: 2890, sha256: "c01db95c24445321c8cff39c8d39c0cc8661fb949b9a0bed67d7368b1ae6453a" },
 ];
 const UUID = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g;
 
@@ -513,28 +510,28 @@ test("only a gate-only change inside an already-confirmed mode takes no risk con
   }
 });
 
-test("with the gate off, a whole turn behaves exactly as it did before the gate existed", async () => {
+test("with the gate off, a whole turn preserves the exact personal-memory baseline", async () => {
   const { h, lock } = await gatedTurn();
   try {
     // 1. Tool execution outcome, refusal text included.
-    assert.deepEqual(runCases(h, lock), PRE_GATE_OUTCOMES);
+    assert.deepEqual(runCases(h, lock), GATE_OFF_OUTCOMES);
     // The turn's deliveries are recorded without their caller awaiting them, so
     // the log has to be read once its writes have settled. This waits for the
     // work already issued; it does not wait for, or start, anything new.
     await h.settle();
     const events = await h.events();
     // 2. The emitted event sequence.
-    assert.deepEqual(events.map((event) => event.type), PRE_GATE_EVENT_TYPES);
+    assert.deepEqual(events.map((event) => event.type), MEMORY_GATE_OFF_EVENT_TYPES);
     assert.ok(!events.some((event) => event.type === "action_gate"),
       "a room with the gate off records no judgement about its executions");
     // 3. The prompt text every delivery carried, compared after replacing the
     //    identifiers that are fresh UUIDs on each run.
     const prompts = events.filter((event) => event.type === "turn.prompt").map((event) => event.payload);
-    assert.deepEqual(prompts.map((payload) => payload.promptChars), PRE_GATE_PROMPTS.map((expected) => expected.chars));
+    assert.deepEqual(prompts.map((payload) => payload.promptChars), MEMORY_GATE_OFF_PROMPTS.map((expected) => expected.chars));
     prompts.forEach((payload, index) => {
       const normalized = payload.prompt.replace(UUID, "{id}");
       assert.equal(createHash("sha256").update(normalized).digest("hex"),
-        PRE_GATE_PROMPTS[index].sha256, normalized);
+        MEMORY_GATE_OFF_PROMPTS[index].sha256, normalized);
     });
   } finally {
     await h.close();
@@ -566,19 +563,19 @@ test("the gate-off turn holds its exact recorded sequence across repeated loaded
     try {
       noise = Array.from({ length: 24 }, (_, index) =>
         writeFile(join(h.directory, `noise-${round}-${index}.tmp`), "x".repeat(8_192)));
-      assert.deepEqual(runCases(h, lock), PRE_GATE_OUTCOMES, `round ${round}: the guard's decisions`);
+      assert.deepEqual(runCases(h, lock), GATE_OFF_OUTCOMES, `round ${round}: the guard's decisions`);
       await h.settle();
       await Promise.all(noise);
       const events = await h.events();
       const types = events.map((event) => event.type);
-      assert.deepEqual(types, PRE_GATE_EVENT_TYPES, `round ${round}: the emitted event sequence`);
+      assert.deepEqual(types, MEMORY_GATE_OFF_EVENT_TYPES, `round ${round}: the emitted event sequence`);
       const prompts = events.filter((event) => event.type === "turn.prompt").map((event) => event.payload);
       assert.deepEqual(prompts.map((payload) => payload.promptChars),
-        PRE_GATE_PROMPTS.map((expected) => expected.chars), `round ${round}: the prompt sizes`);
+        MEMORY_GATE_OFF_PROMPTS.map((expected) => expected.chars), `round ${round}: the prompt sizes`);
       for (const [index, payload] of prompts.entries()) {
         const normalized = payload.prompt.replace(UUID, "{id}");
         assert.equal(createHash("sha256").update(normalized).digest("hex"),
-          PRE_GATE_PROMPTS[index].sha256, `round ${round}: prompt ${index + 1}`);
+          MEMORY_GATE_OFF_PROMPTS[index].sha256, `round ${round}: prompt ${index + 1}`);
       }
       sequences.add(types.join(","));
     } finally {
@@ -587,7 +584,7 @@ test("the gate-off turn holds its exact recorded sequence across repeated loaded
     }
   }
   assert.equal(sequences.size, 1, "every round must record the same sequence, not merely a passing one");
-  assert.deepEqual([...sequences], [PRE_GATE_EVENT_TYPES.join(",")]);
+  assert.deepEqual([...sequences], [MEMORY_GATE_OFF_EVENT_TYPES.join(",")]);
 });
 
 test("turning the gate on only adds refusals, and never rewrites one that already held", async () => {

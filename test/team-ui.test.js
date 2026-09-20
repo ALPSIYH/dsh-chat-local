@@ -187,3 +187,85 @@ test("native remote results are unwrapped and leaving aborts the picker without 
   const saved=harness("DirectoryField",{value:"/original",onChange:path=>changes.push(path)},{uiWorkspace,remote:{directoryPicker:{pick:async()=>({ok:true,value:"/chosen"})}}});await saved.button("選擇資料夾").props.onClick();assert.deepEqual(changes,["/chosen"]);
   let signal,finish;const leaving=harness("DirectoryField",{value:"/original",onChange:path=>changes.push(path)},{uiWorkspace,remote:{directoryPicker:{pick:received=>{signal=received;return new Promise(resolve=>{finish=resolve;});}}}});await leaving.effects();const work=leaving.button("選擇資料夾").props.onClick();await settle();leaving.unmount();assert.equal(signal.aborted,true);finish({ok:true,value:"/late"});await work;assert.deepEqual(changes,["/chosen"]);
 });
+
+test("Agent library opens the stable identity's personality editor without publishing a profile",async()=>{
+  const profile={id:"stable-agent",revision:4,alias:"方法顧問",model:{provider:"p",model:"m"}};
+  const f=harness("AgentLibrary",{}, {},async()=>[profile]);await f.effects();
+  f.find("編輯 方法顧問 的人格").props.onClick();f.render();
+  const editor=f.nodes().find(node=>node.type===f.types.PersonaEditor);
+  assert.equal(editor.props.agent.id,"stable-agent");
+  assert.equal(f.calls.filter(call=>call.method==="POST").length,0);
+  editor.props.onClose();f.render();assert.equal(f.nodes().some(node=>node.type===f.types.PersonaEditor),false);
+});
+
+test("personality templates remain unconfigured until an edited Markdown save carries the read hash",async()=>{
+  let saved;const profile={agentId:"agent/a",markdown:"<!-- persona:unconfigured -->\n# 人格\n尚未設定。",hash:"template-hash",configured:false};
+  const f=harness("PersonaEditor",{agent:{id:"agent/a",alias:"顧問"},onClose(){},onSaved:value=>{saved=value;}},{},async(path,body)=>body?{...profile,markdown:body.markdown,hash:"saved-hash",configured:true}:profile);
+  await f.effects();assert.equal(f.calls[0].path,"/agents/agent%2Fa/persona");
+  assert.match(f.text(),/尚未設定人格/);assert.doesNotMatch(f.find("Agent 人格 Markdown").props.value,/persona:unconfigured/);
+  assert.equal(f.button("保存人格").props.disabled,true);
+  f.find("Agent 人格 Markdown").props.onChange({target:{value:"# 人格\n偏好先核對證據。"}});f.render();
+  await f.find("編輯 Agent 人格").props.onSubmit({preventDefault(){}});f.render();
+  const write=f.calls.find(call=>call.method==="POST");
+  assert.deepEqual(write.body,{markdown:"# 人格\n偏好先核對證據。",expectedHash:"template-hash"});
+  assert.equal(saved.configured,true);assert.match(f.text(),/已設定人格/);assert.equal(f.button("保存人格").props.disabled,true);
+});
+
+test("personality conflict retains local Markdown and cannot overwrite until the user compares versions",async()=>{
+  const old={agentId:"a",markdown:"# 原人格",hash:"old",configured:true},latest={...old,markdown:"# 另一處修改",hash:"new"};
+  let reads=0,writes=0;
+  const f=harness("PersonaEditor",{agent:{id:"a",alias:"顧問"},onClose(){}},{},async(path,body)=>{
+    if(!body)return reads++===0?old:latest;
+    if(writes++===0)throw Object.assign(new Error("changed"),{status:409});
+    return {...latest,markdown:body.markdown,hash:"final"};
+  });
+  await f.effects();f.find("Agent 人格 Markdown").props.onChange({target:{value:"# 我的修改"}});f.render();
+  await f.find("編輯 Agent 人格").props.onSubmit({preventDefault(){}});f.render();
+  assert.equal(f.find("Agent 人格 Markdown").props.value,"# 我的修改");
+  assert.equal(f.find("最新已保存人格").props.value,"# 另一處修改");
+  assert.equal(f.button("保存人格").props.disabled,true);
+  await f.find("編輯 Agent 人格").props.onSubmit({preventDefault(){}});assert.equal(writes,1,"a stale form submit cannot bypass comparison");
+  f.button("已比較，保留我的修改").props.onClick();f.render();
+  assert.equal(f.find("Agent 人格 Markdown").props.value,"# 我的修改");assert.equal(writes,1,"comparison is not an automatic write");
+  await f.find("編輯 Agent 人格").props.onSubmit({preventDefault(){}});f.render();
+  assert.equal(f.calls.filter(call=>call.method==="POST")[1].body.expectedHash,"new");
+  assert.equal(f.find("Agent 人格 Markdown").props.value,"# 我的修改");
+});
+
+test("personality drafts survive close and reopening without silently adopting a newer server hash",async()=>{
+  const storage=new Map(),globals={localStorage:{getItem:key=>storage.get(key)??null,setItem:(key,value)=>storage.set(key,value),removeItem:key=>storage.delete(key)}};
+  const original={agentId:"a",markdown:"# Original",hash:"h1",configured:true};let closed=0;
+  const first=harness("PersonaEditor",{agent:{id:"a"},onClose:()=>{closed++;}},{},async()=>original,globals);
+  await first.effects();first.find("Agent 人格 Markdown").props.onChange({target:{value:"# Local draft"}});first.render();
+  first.button("關閉").props.onClick();assert.equal(closed,1);first.unmount();
+  const second=harness("PersonaEditor",{agent:{id:"a"},onClose(){}},{},async()=>({...original,markdown:"# Server edit",hash:"h2"}),globals);
+  await second.effects();assert.equal(second.find("Agent 人格 Markdown").props.value,"# Local draft");
+  assert.equal(second.find("最新已保存人格").props.value,"# Server edit");assert.equal(second.button("保存人格").props.disabled,true);
+  assert.equal(second.calls.filter(call=>call.method==="POST").length,0);
+  second.button("採用最新版本，捨棄我的修改").props.onClick();second.render();
+  assert.equal(second.find("Agent 人格 Markdown").props.value,"# Server edit");assert.equal(storage.size,0);
+});
+
+test("an uncertain personality save preserves input and reconciles an already-written server copy",async()=>{
+  let stored={agentId:"a",markdown:"# Before",hash:"before",configured:true},writes=0;
+  const f=harness("PersonaEditor",{agent:{id:"a"},onClose(){}},{},async(path,body)=>{
+    if(!body)return stored;
+    if(writes++===0){stored={...stored,markdown:body.markdown,hash:"after"};throw new Error("response lost");}
+    throw Object.assign(new Error("changed"),{status:409});
+  });
+  await f.effects();f.find("Agent 人格 Markdown").props.onChange({target:{value:"# My personality"}});f.render();
+  await f.find("編輯 Agent 人格").props.onSubmit({preventDefault(){}});f.render();
+  assert.match(f.text(),/保存未確認/);assert.equal(f.find("Agent 人格 Markdown").props.value,"# My personality");
+  await f.find("編輯 Agent 人格").props.onSubmit({preventDefault(){}});f.render();
+  assert.match(f.text(),/已核對伺服器版本/);assert.equal(f.find("人格版本衝突"),undefined);assert.equal(f.button("保存人格").props.disabled,true);
+  assert.deepEqual(f.calls.filter(call=>call.method==="POST").map(call=>call.body.expectedHash),["before","before"]);
+});
+
+test("personality IME cannot submit and failed draft caching does not silently discard edits",async()=>{
+  let closed=0;const f=harness("PersonaEditor",{agent:{id:"a"},onClose:()=>{closed++;}},{},async()=>({agentId:"a",markdown:"# Before",hash:"h",configured:true}));
+  await f.effects();f.find("Agent 人格 Markdown").props.onChange({target:{value:"# Input"}});f.render();
+  const form=f.find("編輯 Agent 人格");form.props.onCompositionStart();await form.props.onSubmit({preventDefault(){}});
+  assert.equal(f.calls.filter(call=>call.method==="POST").length,0);form.props.onCompositionEnd();
+  f.button("關閉").props.onClick();f.render();assert.equal(closed,0);assert.match(f.text(),/草稿暫存不可用/);
+  f.button("返回編輯").props.onClick();f.render();assert.equal(f.find("Agent 人格 Markdown").props.value,"# Input");
+});

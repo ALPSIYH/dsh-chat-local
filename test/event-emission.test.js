@@ -337,7 +337,7 @@ test("a member who replies before the sent transition flushes still gets a deliv
     // the reply below is driven while the `sent` save is still in flight.
     h.ctx.dshBridge.deliverExternal = async (from, to, text, delivery) => {
       h.calls.push({ from, to, text, delivery });
-      h.service.saveTail = inFlight;
+      h.service.journal.writeTail = inFlight;
     };
     await h.service.send({ roomId: h.room.id, author: "human:me", authorKind: "human", text: "开始" });
     const call = await waitFor(() => h.calls[0], "the member delivery");
@@ -1441,7 +1441,8 @@ test("one turn samples the log once, and every member's digest is that turn's ow
   await quiesce(h.service, h.room.id);
   // One log read per turn, however many members that turn wakes, and no call to
   // the async projection at all: the digest is rendered, not projected.
-  assert.deepEqual(reads, [h.room.id, h.room.id]);
+  assert.equal(reads.filter(id => id === h.room.id).length, 2);
+  assert.ok([...new Set(reads)].every(id => reads.filter(value => value === id).length === 2), "every source is read once per turn, never per member");
   assert.deepEqual(projections, []);
   const events = await h.service.eventsFor(h.room.id);
   const snapshot = events.filter((event) => event.type === "relationship.snapshot").at(-1);

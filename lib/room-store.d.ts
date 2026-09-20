@@ -1,5 +1,7 @@
+import type { DshChatLocalConfig } from "./index.js";
+
 export declare class DshChatLocalService {
-  constructor(ctx: any, config?: any);
+  constructor(ctx: any, config?: DshChatLocalConfig);
   workspace: {
     list(): Promise<any>;
     configuration(groupId?: string): Promise<any>;
@@ -40,7 +42,7 @@ export declare class DshChatLocalService {
    * member of the room holds an active group-chat turn. The counters as they
    * stood before the intervention are recorded in the event.
    */
-  relationshipIntervention(roomId: string, input: any): Promise<any>;
+  relationshipIntervention(roomId: string, input: { action: "set" | "clear" | "seed"; appliedBy: "human"; mechanism: string; observerId?: string; targetId?: string; counters?: Record<string, number> | null; memoryScope?: "counters" | "all"; note?: string | null }): Promise<any>;
   /**
    * Human-only, under the same rules as `relationshipIntervention`: record the
    * `run.manifest` that fixes one run's arm, models, state version, start tick
@@ -66,6 +68,12 @@ export declare class DshChatLocalService {
   proposeCharter(roomId: string, sessionId: string, input: any): Promise<any>;
   reviewCharter(roomId: string, sessionId: string, input: any): Promise<any>;
   roomMemory(roomId: string, sessionId?: string): Promise<any>;
+  /** Own identity is resolved from the executing session; room only disambiguates membership. */
+  agentIdentity(sessionId: string, roomId?: string): Promise<any>;
+  /** Optional native system-prompt context, absent for unbound or group-turn sessions. */
+  nativeAgentContext(sessionId: string): Promise<string | null>;
+  /** Read only personally observed sources bound to this identity. */
+  agentMemory(sessionId: string, input?: { roomId?: string; query?: string; limit?: number }): Promise<any>;
   deleteRoom(roomId: string, input: any): Promise<any>;
   restoreRoom(roomId: string, input: any): Promise<any>;
   stopRoom(roomId: string): Promise<any>;
@@ -92,6 +100,7 @@ export declare class DshChatLocalService {
   exportRoom(roomId: string, format?: string): Promise<any>;
   saveRoomExport(roomId: string, format?: string): Promise<any>;
   snapshotRun(roomId: string, configHash?: string): Promise<any>;
+  readRoomMemory(roomId: string): Promise<{ room: any; events: any[] }>;
   restoreFromSnapshot(snapshot: any, input?: any): Promise<any>;
   observeSessionEvent(sessionId: string, event: any): Promise<void>;
   close(): Promise<void>;

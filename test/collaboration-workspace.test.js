@@ -6,6 +6,7 @@ import {join} from "node:path";
 import {DshChatLocalService} from "../lib/room-store.js";
 import {workProtocol} from "../lib/work-protocol.js";
 import {deriveRelationships} from "../lib/relationship.js";
+import {blockStateFile} from "./state-file-failure.js";
 
 async function fixture(run){
   const dir=await mkdtemp(join(tmpdir(),"dcl-workspace-")),path=join(dir,"rooms.json"),agents=new Map(),calls=[];let created=0;
@@ -518,7 +519,7 @@ test("legacy per-member native presets remain environment bindings, not roster p
 test("an inner dispatch save failure clears the phantom queue and retry actually delivers exactly once",()=>fixture(async h=>{
   const g=await group(h);let draft=await h.service.workspace.openDraft({groupId:g.id});draft=await h.service.workspace.saveDraft(draft.id,{expectedRevision:draft.revision,text:"真实派送到假 Host"});
   const deliver=h.service.deliverSavedMessage.bind(h.service);let first=true;
-  h.service.deliverSavedMessage=async(...args)=>{if(!first)return deliver(...args);first=false;h.service.path=h.dir;try{return await deliver(...args);}finally{h.service.path=h.path;}};
+  h.service.deliverSavedMessage=async(...args)=>{if(!first)return deliver(...args);first=false;const release=await blockStateFile(h.path);try{return await deliver(...args);}finally{await release();}};
   await assert.rejects(h.service.workspace.startDraft(draft.id,{expectedRevision:draft.revision}));
   assert.equal(h.calls.length,0);assert.equal(h.service.state.workspace.drafts[0].start.state,"saved");assert.notEqual(h.service.state.rooms[0].orchestration.state,"queued");assert.ok(!h.service.state.rooms[0].messages[0].dispatchAttempted);
   const result=await h.service.workspace.startDraft(draft.id,{expectedRevision:draft.revision});

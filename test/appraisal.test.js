@@ -197,7 +197,7 @@ test("an appraisal citing an id this room's log does not carry is refused", asyn
   try {
     const call = await h.schedule("请评估", ["s1"]);
     await h.openTurn(call);
-    const known = (await h.events())[0].id;
+    const known = await triggeringMessageId(h);
     await h.settle();
     const before = (await h.events()).length;
     const tool = h.tool("chat_appraise");
@@ -217,17 +217,58 @@ test("an appraisal citing an id this room's log does not carry is refused", asyn
   } finally { await h.close(); }
 });
 
-test("the ids a message, a ledger entry and an envelope carry are all citable evidence", async () => {
+test("an observed message and its envelope are both citable evidence", async () => {
   const h = await bootPlugin();
   try {
     const call = await h.schedule("请评估", ["s1"]);
     await h.openTurn(call);
     const events = await h.events();
-    const envelope = events.find((event) => event.type === "turn.scheduled").id;
     const message = await triggeringMessageId(h);
+    const envelope = events.find((event) => event.type === "message.created" && event.payload.messageId === message).id;
     const recorded = await h.tool("chat_appraise").execute({ room: h.room.id,
       ...appraisal({ evidenceEventIds: [message, envelope] }) }, h.exec("s1"));
     assert.deepEqual(recorded.evidenceEventIds, [message, envelope]);
+  } finally { await h.close(); }
+});
+
+test("knowing another observer's private appraisal id does not make it valid evidence", async () => {
+  const h = await bootPlugin();
+  try {
+    const first = await recordAppraisal(h, "s1");
+    await h.endTurn(first.call);
+    const second = await h.schedule("请独立评估", ["s2"]);
+    await h.openTurn(second);
+    await assert.rejects(h.service.appraise(h.room.id, "s2", appraisal({ aboutAgentId: "s1",
+      evidenceEventIds: [first.value.appraisalId] })), /evidence|observed|本人|证据/);
+  } finally { await h.close(); }
+});
+
+test("a message added after delivery is not evidence until the observer reads it", async () => {
+  const h = await bootPlugin();
+  try {
+    const call = await h.schedule("请评估", ["s1"]);
+    await h.openTurn(call);
+    const unseen = await h.service.send({ roomId: h.room.id, author: "human:me", authorKind: "human",
+      text: "尚未送达本人", automaticDelivery: false });
+    await assert.rejects(h.service.appraise(h.room.id, "s1", appraisal({ evidenceEventIds: [unseen.id] })), /evidence|observed|本人|证据/);
+    await h.tool("chat_memory").execute({ room: h.room.id }, h.exec("s1"));
+    const recorded = await h.service.appraise(h.room.id, "s1", appraisal({ evidenceEventIds: [unseen.id] }));
+    assert.deepEqual(recorded.evidenceEventIds, [unseen.id]);
+  } finally { await h.close(); }
+});
+
+test("reusing a Session for a different Agent does not inherit the previous Agent's private appraisal", async () => {
+  const h = await bootPlugin();
+  try {
+    const first = await recordAppraisal(h, "s1");
+    await h.endTurn(first.call);
+    await waitFor(() => h.service.state.rooms[0].orchestration.state === "idle", "the old identity to finish");
+    await h.service.removeMember(h.room.id, "s1");
+    const next = await h.service.directory.save({ operationId: "new-identity", profile: { alias: "新身分" } });
+    await h.service.addMember(h.room.id, { kind: "session", sessionId: "s1", alias: "新身分", agentId: next.id });
+    assert.deepEqual((await h.service.relationshipRow(h.room.id, "s1")).appraisals, {});
+    assert.ok(!(await h.service.appraisals(h.room.id)).s1);
+    assert.ok((await h.service.eventsFor(h.room.id)).some(event => event.id === first.value.appraisalId), "history is preserved, not deleted");
   } finally { await h.close(); }
 });
 
@@ -252,6 +293,7 @@ test("a charter proposal id is citable through its ledger transition, and no cha
     // `#messageEvent` does not copy into the payload.
     assert.deepEqual(events.filter((event) => String(event.type).startsWith("charter.")), []);
     assert.deepEqual(events.filter((event) => event.payload && "proposalId" in event.payload), []);
+    await h.tool("chat_memory").execute({ room: h.room.id }, h.exec("s1"));
     const recorded = await h.tool("chat_appraise").execute({ room: h.room.id,
       ...appraisal({ evidenceEventIds: [proposal.id, source] }) }, h.exec("s1"));
     assert.deepEqual(recorded.evidenceEventIds, [proposal.id, source]);
@@ -263,7 +305,7 @@ test("stance and confidence bounds are refused rather than clamped or dropped", 
   try {
     const call = await h.schedule("请评估", ["s1"]);
     await h.openTurn(call);
-    const known = (await h.events())[0].id;
+    const known = await triggeringMessageId(h);
     const tool = h.tool("chat_appraise");
     for (const stance of ["superb", "Trust", "", undefined, null]) {
       await assert.rejects(tool.execute({ room: h.room.id,
@@ -288,7 +330,7 @@ test("a member may appraise only another member of this room", async () => {
   try {
     const call = await h.schedule("请评估", ["s1"]);
     await h.openTurn(call);
-    const known = (await h.events())[0].id;
+    const known = await triggeringMessageId(h);
     const tool = h.tool("chat_appraise");
     await assert.rejects(tool.execute({ room: h.room.id,
       ...appraisal({ evidenceEventIds: [known], aboutAgentId: "s1" }) }, h.exec("s1")), /cannot appraise themselves/);
@@ -319,7 +361,7 @@ test("an appraisal without an active turn is refused, and unknown fields are rej
       /turn/, "recording an appraisal requires this room's active participant turn");
     const call = await h.schedule("请评估", ["s1"]);
     await h.openTurn(call);
-    const known = (await h.events())[0].id;
+    const known = await triggeringMessageId(h);
     await assert.rejects(tool.execute({ room: h.room.id, aboutAgentId: "s2", stance: "trust",
       confidence: 0.5, claim: "说了算", evidenceEventIds: [known], surprise: 1 }, h.exec("s1")),
     /unsupported appraisal field/);
@@ -532,14 +574,14 @@ test("the 600-character cap holds with appraisals in the merge, at any room size
     assert.ok(digest.length <= RELATIONSHIP_DIGEST_MAX_CHARS, `size ${size}: ${digest.length} characters`);
     assert.match(digest.split("\n")[0], /本房间事件记录/u);
   }
-  // A digest with no room for the judged block still renders the counts, and the
-  // judged block never arrives half-rendered.
+  // A single oversized judgement is omitted as a complete attributed row;
+  // counter rows that fit can still be rendered.
   const crowded = { pairs: [{ observer: "m0", target: "m1", tick: 0, counters: { messagesAuthored: 5 } }] };
   const noRoom = relationshipDigest({ derived: crowded, observer: "m0",
     appraisals: { m0: { m1: { stance: "trust", confidence: 1, claim, evidenceCount: 1 } } },
     labelOf: (target) => target.padEnd(470, "长") });
   assert.ok(noRoom.length <= RELATIONSHIP_DIGEST_MAX_CHARS);
-  assert.ok(!noRoom.includes("（判断）"), "a block that cannot fit whole is left out, never cut");
+  assert.ok(!noRoom.includes("（判断）"), "a judgement row that cannot fit is left out, never cut");
 });
 
 test("an oversized perceived role is quoted short, not turned into a dropped judgement", () => {
@@ -560,11 +602,10 @@ test("an oversized perceived role is quoted short, not turned into a dropped jud
   assert.ok(digest.length <= RELATIONSHIP_DIGEST_MAX_CHARS, `${digest.length} characters`);
 });
 
-test("the judged block never arrives half-rendered, whatever the role and claim lengths", () => {
-  // Whole or not at all: with two judged counterparties, a heading carrying one
-  // judgement line and not the other is the partial block the rule forbids. The
-  // 460-character role is the one that used to trip the per-line check while the
-  // other line still rendered.
+test("both bounded judgement rows fit with these role and claim lengths", () => {
+  // These two bounded rows fit together. A long role is shortened at its own
+  // boundary, so it cannot displace this judgement from an otherwise fitting
+  // digest. Larger collections may omit individual rows with coverage metadata.
   const cases = [
     { role: 0, claim: 5 }, { role: 100, claim: 5 }, { role: 121, claim: 121 },
     { role: 460, claim: 60 }, { role: 500, claim: 5 }, { role: 5000, claim: 5000 }
@@ -585,7 +626,7 @@ test("the judged block never arrives half-rendered, whatever the role and claim 
     assert.ok(digest.length <= RELATIONSHIP_DIGEST_MAX_CHARS, `${label}: ${digest.length} characters`);
     const judgements = digest.split("\n").filter((line) => line.startsWith("（判断）"));
     if (digest.includes("（判断）")) {
-      assert.equal(judgements.length, 2, `${label}: both judgements or neither`);
+      assert.equal(judgements.length, 2, `${label}: both bounded rows fit in this fixture`);
     } else {
       assert.equal(judgements.length, 0, `${label}: no judgement line without the block`);
     }

@@ -2,6 +2,18 @@ import type { DshChatLocalService } from "./room-store.js";
 
 export declare const name = "dsh-chat-local";
 export declare const inject: string[];
+export interface DshChatLocalConfig {
+  path?: string;
+  maxTurnsPerParticipant?: number;
+  maxRounds?: number;
+  maxReplies?: number;
+  replyTimeoutMs?: number;
+  monitorMinuteMs?: number;
+  monitorIntervalMs?: number;
+  appraisalDigest?: boolean;
+  /** Inject personally observed memory into later tasks. Defaults to true. */
+  personalMemory?: boolean;
+}
 /**
  * The plugin's mount point.
  *
@@ -14,4 +26,4 @@ export declare const inject: string[];
  * dispatched by construction, and Cordis then treats the returned service as the
  * plugin's effect and rejects it. See `test/plugin-mount.test.js`.
  */
-export declare function apply(ctx: any, config?: any): DshChatLocalService;
+export declare function apply(ctx: any, config?: DshChatLocalConfig): DshChatLocalService;
