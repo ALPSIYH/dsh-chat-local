@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DshChatLocalService, relationshipDigest, RELATIONSHIP_DIGEST_MAX_CHARS } from "../lib/room-store.js";
@@ -18,13 +18,13 @@ async function waitFor(predicate, label = "condition", timeoutMs = 2_000) {
 }
 
 /** Drive one delivered member through a complete native turn, as DSH reports it. */
-async function replyTo(service, call, text) {
-  await service.observeSessionEvent(call.to, { type: "turn/start", data: { turn: 1 } });
+async function replyTo(service, call, text, turn = 1) {
+  await service.observeSessionEvent(call.to, { type: "turn/start", data: { turn } });
   await service.observeSessionEvent(call.to, { type: "user/message", data: { content: [{ type: "text",
     text: `[dsh-bridge dsh-chat-local-room message ${call.delivery.id} from ${call.from}]` }] } });
-  await service.observeSessionEvent(call.to, { type: "assistant/message", data: { turn: 1, step: 1,
+  await service.observeSessionEvent(call.to, { type: "assistant/message", data: { turn, step: 1,
     message: { content: [{ type: "text", text }] } } });
-  await service.observeSessionEvent(call.to, { type: "turn/end", data: { turn: 1, reason: { kind: "completed" } } });
+  await service.observeSessionEvent(call.to, { type: "turn/end", data: { turn, reason: { kind: "completed" } } });
 }
 
 async function harness(options = {}) {
@@ -1094,26 +1094,57 @@ test("every scheduled turn appends its own snapshot, and the projection moves to
   await h.service.close();
 });
 
-test("an unreadable event log does not fail the turn that would have been snapshotted", async () => {
-  const h = await harness({ autoDeliver: true });
-  // A regular file where the per-room log directory belongs makes both the read
-  // the snapshot needs and every append fail, so the audit side cannot succeed
-  // by accident. Creating the room is itself a membership fact, so the directory
-  // already exists and is replaced rather than written over.
-  await rm(join(h.directory, "events"), { recursive: true, force: true });
-  await writeFile(join(h.directory, "events"), "not a directory", "utf8");
-  await assert.doesNotReject(async () => {
-    await h.service.send({ roomId: h.room.id, author: "human:me", authorKind: "human", text: "仍然成功" });
-  });
-  const call = await waitFor(() => h.calls[0], "the member delivery despite the audit failure");
-  await replyTo(h.service, call, "回复");
-  await quiesce(h.service, h.room.id);
-  assert.equal(h.service.logHealth().failed >= 1, true);
-  // The turn ran to the end and the reply reached the room: an audit failure is
-  // counted, never fatal.
-  assert.equal((await h.service.resolveRoom(h.room.id)).orchestration.state, "idle");
-  assert.equal((await h.service.messages(h.room.id)).some((message) => message.text === "回复"), true);
-  await h.service.close();
+test("unreadable observation accounting rejects new Agent memory and recovers after storage repair", async () => {
+  const h = await harness({ autoDeliver: true, replyTimeoutMs: 5_000 });
+  // Preserve every existing log and anchor: repairing storage must not mean
+  // silently starting a new history after deleting the old one.
+  await h.service.journal.settled();
+  const eventsPath = join(h.directory, "events");
+  const savedPath = join(h.directory, "saved-events");
+  await rename(eventsPath, savedPath);
+  await writeFile(eventsPath, "not a directory", "utf8");
+  let restored = false;
+  try {
+    const sent = await h.service.send({ roomId: h.room.id, author: "human:me", authorKind: "human", text: "人类消息仍保存" });
+    const call = await waitFor(() => h.calls[0], "the member delivery despite the audit failure");
+    await assert.rejects(replyTo(h.service, call, "不能假称已完成的回复"), /observation receipt could not be persisted/);
+    // DSH may continue emitting a model answer after its receipt hook failed.
+    // The authored-memory charge must still be fenced at the state commit.
+    await h.service.observeSessionEvent(call.to, { type: "assistant/message", data: { turn: 1, step: 1,
+      message: { content: [{ type: "text", text: "不能假称已完成的回复" }] } } });
+    await assert.rejects(h.service.observeSessionEvent(call.to, { type: "turn/end", data: { turn: 1,
+      reason: { kind: "completed" } } }), /capacity exhausted|cannot be verified/);
+    const health = h.service.logHealth();
+    assert.ok(health.failed >= 1);
+    assert.ok(health.memory.coverage.failedReceipts >= 1, "failed exposure receipts remain visible to health readers");
+    assert.ok(health.storage.rejected >= 1, "unknown Agent usage applies write backpressure");
+    assert.equal(health.storage.agentAccountingError, "ENOTDIR");
+    assert.match(h.service.guardToolExecution({ agent: { session: { id: call.to } }, name: "bash",
+      arguments: { command: "echo forbidden" } }), /discuss_only/, "receipt failure cannot remove the installed action guard");
+    const persisted = JSON.parse(await readFile(join(h.directory, "rooms.json"), "utf8"));
+    const messages = persisted.rooms.find(room => room.id === h.room.id).messages;
+    assert.ok(messages.some(message => message.id === sent.id));
+    assert.ok(!messages.some(message => message.text === "不能假称已完成的回复"),
+      "a rejected authored charge must not become a durable reply");
+
+    await rm(eventsPath);
+    await rename(savedPath, eventsPath);
+    restored = true;
+    await h.service.stopRoom(h.room.id);
+    await h.service.send({ roomId: h.room.id, author: "human:me", authorKind: "human", text: "修复后重新开始" });
+    const recovered = await waitFor(() => h.calls[1], "a new delivery after repairing storage");
+    await replyTo(h.service, recovered, "修复后的回复", 2);
+    await quiesce(h.service, h.room.id);
+    assert.ok((await h.service.messages(h.room.id)).some(message => message.text === "修复后的回复"));
+    assert.ok((await h.service.eventsFor(h.room.id)).some(event => event.type === "message.created"
+      && event.payload.text === "修复后的回复"), "recovery writes actual durable evidence");
+    assert.equal(h.service.logHealth().storage.agentAccountingError, null);
+    assert.ok(h.service.logHealth().memory.coverage.failedReceipts >= 1, "recovery must not erase earlier failures");
+  } finally {
+    if (!restored) { await rm(eventsPath, { force: true }); await rename(savedPath, eventsPath); }
+    await h.service.close();
+    await rm(h.directory, { recursive: true, force: true });
+  }
 });
 
 test("a snapshot whose save never lands is not appended to the log", async () => {
@@ -1460,23 +1491,60 @@ test("one turn samples the log once, and every member's digest is that turn's ow
   await h.service.close();
 });
 
-test("with no readable relationship state the prompt carries no digest at all", async () => {
-  const h = await harness({ autoDeliver: true });
+test("unreadable relationship storage omits the digest and refuses an unrecorded Agent observation", async () => {
+  const h = await harness({ autoDeliver: true, replyTimeoutMs: 5_000 });
   await h.service.addMember(h.room.id, { kind: "session", sessionId: "s2", alias: "成员二" });
-  // A regular file where the per-room log directory belongs makes the audit read
-  // fail while the room itself keeps running.
-  await rm(join(h.directory, "events"), { recursive: true, force: true });
-  await writeFile(join(h.directory, "events"), "not a directory", "utf8");
-  await assert.doesNotReject(async () => {
-    await h.service.send({ roomId: h.room.id, author: "human:me", authorKind: "human", text: "仍然投递" });
-  });
-  const call = await waitFor(() => h.calls[0], "the delivery despite the audit failure");
-  assert.equal(digestIn(call.text), undefined, "a failed observation injects nothing, not an empty heading");
-  assert.ok(call.text.includes("可对话的其他参与者：@成员二"), "the rest of the prompt is intact");
-  await replyTo(h.service, call, "回复");
-  await quiesce(h.service, h.room.id);
-  assert.equal((await h.service.resolveRoom(h.room.id)).orchestration.state, "idle");
-  await h.service.close();
+  await h.service.journal.settled();
+  const eventsPath = join(h.directory, "events"), savedPath = join(h.directory, "saved-events");
+  await rename(eventsPath, savedPath);
+  await writeFile(eventsPath, "not a directory", "utf8");
+  let restored = false;
+  try {
+    await h.service.send({ roomId: h.room.id, author: "human:me", authorKind: "human", text: "仍然投递", mentions: ["s1"] });
+    const call = await waitFor(() => h.calls[0], "the delivery despite the audit failure");
+    assert.equal(digestIn(call.text), undefined, "a failed relationship read injects no digest or empty heading");
+    assert.ok(call.text.includes("可对话的其他参与者：@成员二"), "the participant list remains intact");
+    await assert.rejects(replyTo(h.service, call, "未记录的回复"), /observation receipt could not be persisted/);
+    assert.ok(h.service.logHealth().memory.coverage.failedReceipts >= 1);
+    assert.equal(h.service.logHealth().storage.agentAccountingError, "ENOTDIR");
+    assert.ok(!(await h.service.messages(h.room.id)).some(message => message.text === "未记录的回复"));
+    await rm(eventsPath); await rename(savedPath, eventsPath); restored = true;
+    await h.service.stopRoom(h.room.id);
+    await h.service.send({ roomId: h.room.id, author: "human:me", authorKind: "human", text: "来源修复", mentions: ["s1"] });
+    const recovered = await waitFor(() => h.calls[1], "a repaired relationship-source delivery");
+    await replyTo(h.service, recovered, "来源恢复后可回复", 2);
+    await quiesce(h.service, h.room.id);
+    assert.ok((await h.service.messages(h.room.id)).some(message => message.text === "来源恢复后可回复"));
+  } finally {
+    if (!restored) { await rm(eventsPath, { force: true }); await rename(savedPath, eventsPath); }
+    await h.service.close(); await rm(h.directory, { recursive: true, force: true });
+  }
+});
+
+test("a failed relationship read omits the digest while independent persona and writable receipts remain available", async () => {
+  const h = await harness({ autoDeliver: true, replyTimeoutMs: 5_000 });
+  const member = (await h.service.resolveRoom(h.room.id)).members.find(item => item.sessionId === "s1");
+  const persona = await h.service.directory.persona(member.agentId);
+  await h.service.directory.savePersona(member.agentId, { markdown: "# Persona\nStable configured personality survives unavailable relationship evidence.", expectedHash: persona.hash });
+  const original = h.service.journal.readEvents.bind(h.service.journal);
+  h.service.journal.readEvents = async (...args) => {
+    if (args[0] === h.room.id) throw new Error("injected relationship read failure");
+    return original(...args);
+  };
+  try {
+    await h.service.send({ roomId: h.room.id, author: "human:me", authorKind: "human", text: "读取失败仍保持人格" });
+    const call = await waitFor(() => h.calls[0], "delivery with the independent persona");
+    assert.equal(digestIn(call.text), undefined);
+    assert.match(call.text, /Stable configured personality survives unavailable relationship evidence/);
+    await replyTo(h.service, call, "可以记录的回复");
+    await quiesce(h.service, h.room.id);
+    assert.equal(h.service.logHealth().memory.coverage.failedReceipts, 0);
+    assert.equal(h.service.logHealth().storage.agentAccountingError, null);
+    assert.ok((await h.service.messages(h.room.id)).some(message => message.text === "可以记录的回复"));
+  } finally {
+    h.service.journal.readEvents = original;
+    await h.service.close(); await rm(h.directory, { recursive: true, force: true });
+  }
 });
 
 test("a member alias carrying a newline renders as one line in the delivered prompt", async () => {

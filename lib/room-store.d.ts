@@ -3,6 +3,28 @@ import type { DshChatLocalConfig } from "./index.js";
 export interface AuditHealth {
   appended: number; failed: number; lastError: string | null; droppedCount: number; dropped: any[];
   pendingRecovery: number; pendingRooms: string[]; recoveredOperations: number;
+  fullReads: number; viewHits: number; cacheRooms: number; cacheSourceBytes: number;
+  cacheLimitBytes: number; cacheEvictions: number;
+  storage: {
+    usedBytes: number; freeBytes: number | null; reservedBytes: number; obligationBytes: number;
+    obligations: number; hardBytes: number; softBytes: number; recoveryReserveBytes: number;
+    minFreeBytes: number; recoveryDebtBytes: number; agentObservationLimitBytes: number;
+    agentObservationBytes: Record<string, number>; agentAccountingError: string | null;
+    pressure: "normal" | "soft" | "hard"; rejected: number; failed: number; lastError: string | null;
+    checkedAt: number | null; active: boolean; ownership: "single-service-instance"; accounting: "logical-file-bytes";
+  };
+  memory: {
+    coverage: { history: "live-events-only"; modalities: string[]; measuredSince: number;
+      countersScope: "this-service-process"; preMountHistoryImported: false; limitations: string[];
+      observedReceipts: number; failedReceipts: number; unboundEvents: number; ambiguousIdentityEvents: number;
+      nonTextEvents: number; excludedRecallEvents: number };
+    index: { sources: number; agents: number; cards: number; leaves: number; accountedBytes: number;
+      maxIndexBytes: number; maxAgentIndexBytes: number; evictedSources: number;
+      policyHistoryIncomplete: boolean; [key: string]: number | string | boolean };
+    policy: { version: number; consolidation: boolean; decay: boolean; halfLifeDays: number;
+      maxRecallBytes: number; maxIndexBytes: number; maxAgentIndexBytes: number; maxCandidateCount: number };
+    maintenance: { runs: number; failures: number; lastError: string | null; queuedAgents: number; active: boolean };
+  };
   journal: { pendingOperations: number; recoveredOperations: number; checkpointPending: boolean;
     lastError: string | null; syncError: string | null };
 }
@@ -80,7 +102,11 @@ export declare class DshChatLocalService {
   /** Optional native system-prompt context, absent for unbound or group-turn sessions. */
   nativeAgentContext(sessionId: string): Promise<string | null>;
   /** Read only personally observed sources bound to this identity. */
-  agentMemory(sessionId: string, input?: { roomId?: string; query?: string; limit?: number }): Promise<any>;
+  agentMemory(sessionId: string, input?: { roomId?: string; query?: string; limit?: number; mode?: "default" | "explicit" }): Promise<any>;
+  /** Own lifecycle edits require current personally observed evidence and an idempotency key. */
+  updatePersonalMemory(sessionId: string, input: { roomId?: string; action: "pin" | "unpin" | "suppress" | "restore" | "belief" | "revoke_belief"; operationId: string; sourceRoomId?: string; evidenceId?: string; claim?: string; evidence?: { sourceRoomId: string; evidenceId: string }[]; supersedes?: string; beliefId?: string }): Promise<any>;
+  /** Human storage operation; not exposed as an Agent tool. */
+  maintainMemoryStorage(input: { sourceRoomId: string; action: "archive" | "thaw" | "cleanup" }): Promise<any>;
   deleteRoom(roomId: string, input: any): Promise<any>;
   restoreRoom(roomId: string, input: any): Promise<any>;
   stopRoom(roomId: string): Promise<any>;

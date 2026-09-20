@@ -106,15 +106,16 @@ const GATE_OFF_OUTCOMES = [
 ];
 /**
  * Exact post-refactor gate-off baseline. Personal memory adds one receipt before
- * the delivered transition finishes and a 100-character chat_identity/chat_recall paragraph
- * to each prompt. Removing just that paragraph reproduces both old hashes.
+ * the delivered transition finishes. The memory lifecycle adds 47 characters
+ * to the identity/recall paragraph to describe current beliefs and chat_memory_update.
+ * Reverting only that paragraph reproduces both preceding baseline hashes.
  * UUID normalization is the only transformation used in the actual assertions;
  * neither extra event types nor unexpected prompt changes are filtered out.
  */
 const MEMORY_GATE_OFF_EVENT_TYPES = ["member.added", "message.created", "message.created", "turn.scheduled", "relationship.snapshot", "turn.prompt", "injection.cost", "delivery.settled", "message.created", "turn.scheduled", "relationship.snapshot", "turn.prompt", "injection.cost", "delivery.sent", "memory.observed", "delivery.settled"];
 const MEMORY_GATE_OFF_PROMPTS = [
-  { chars: 2834, sha256: "bae97481c262db9ef527969584d8634bd574e44904eff1f2349e9930859b8911" },
-  { chars: 2890, sha256: "c01db95c24445321c8cff39c8d39c0cc8661fb949b9a0bed67d7368b1ae6453a" },
+  { chars: 2881, sha256: "ab52be505e8dc9347cde523608bfd77df37c3b1c46155ddf5d433b69f7968c3e" },
+  { chars: 2937, sha256: "dd947c64f9549549d64b9d33962a39b99637433637bf22f3a8d6ed0d846d8d5d" },
 ];
 const UUID = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g;
 

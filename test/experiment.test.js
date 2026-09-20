@@ -192,6 +192,7 @@ test("the whole source of the fingerprinted modules is part of the hash", () => 
   // new one has to be added deliberately rather than silently falling outside.
   assert.deepEqual([...SOURCE_FINGERPRINT_MODULES], [
     "experiment.js", "relationship.js", "agent-directory.js", "agent-memory.js", "agent-persona.js",
+    "agent-memory-index.js", "memory-lifecycle.js", "observation-coverage.js", "storage-capacity.js", "cold-log.js",
     "collaboration-workspace.js", "conversation-model.js", "document-reader.js", "document-reference.js",
     "event-log.js", "gate.js", "index.js", "native-conversations.js", "native-permissions.js",
     "restricted-read.js", "room-export.js", "room-journal.js", "room-store.js", "text-protocol.js", "work-protocol.js"

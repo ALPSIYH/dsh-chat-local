@@ -142,3 +142,21 @@ test("native context awaits other providers and passes personality Markdown as a
     assert.deepEqual(unchanged, { contexts: [], variables: {} });
   }
 });
+
+test("registered memory lifecycle tool binds its owner, enforces suppression and preserves persona", async t => {
+  const h = await mounted(t);
+  const identity = await h.execute("chat_identity", "s1");
+  await h.service.observeSessionEvent("s1", {type:"user/message",data:{content:[{type:"text",text:"Tool lifecycle private evidence"}]}});
+  const item = (await h.execute("chat_recall", "s1", {query:"Tool lifecycle"})).experiences[0];
+  const args = {action:"suppress",operationId:"tool-suppress",sourceRoomId:item.sourceRoomId,evidenceId:item.evidenceId};
+  await assert.rejects(h.execute("chat_memory_update","s2",args),/observed evidence/);
+  await assert.rejects(h.execute("chat_memory_update","s1",{...args,agentId:identity.agentId}),/unsupported personal memory argument/);
+  await assert.rejects(h.tools.get("chat_memory_update").execute(args,{}),/owning DSH session/);
+  const saved = await h.execute("chat_memory_update","s1",args);
+  assert.equal((await h.execute("chat_memory_update","s1",args)).eventId,saved.eventId);
+  assert.doesNotMatch(JSON.stringify(await h.execute("chat_recall","s1",{query:"Tool lifecycle"})),/Tool lifecycle private evidence/);
+  await h.execute("chat_memory_update","s1",{...args,action:"restore",operationId:"tool-restore"});
+  assert.match(JSON.stringify(await h.execute("chat_recall","s1",{query:"Tool lifecycle"})),/Tool lifecycle private evidence/);
+  assert.equal((await h.execute("chat_identity","s1")).persona.hash,identity.persona.hash);
+  assert.deepEqual(classifyToolExecution("chat_memory_update",{}),{riskClass:"low",action:"work"});
+});

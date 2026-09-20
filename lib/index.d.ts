@@ -13,6 +13,14 @@ export interface DshChatLocalConfig {
   appraisalDigest?: boolean;
   /** Inject personally observed memory into later tasks. Defaults to true. */
   personalMemory?: boolean;
+  memoryLifecycle?: {
+    consolidation?: boolean; decay?: boolean; halfLifeDays?: number;
+    maxRecallBytes?: number; maxIndexBytes?: number; maxAgentIndexBytes?: number; maxCandidateCount?: number;
+  };
+  storage?: {
+    hardBytes?: number; softBytes?: number; recoveryReserveBytes?: number;
+    minFreeBytes?: number; agentObservationBytes?: number;
+  };
 }
 /**
  * The plugin's mount point.

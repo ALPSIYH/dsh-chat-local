@@ -320,24 +320,33 @@ test("closing drains an already-staged restore but rejects queued restores befor
 
 test("closing during restore backup prevents the unstaged room from being installed afterward", async () => {
   const directory = await mkdtemp(join(tmpdir(), "dcl-close-restore-backup-")), path = join(directory, "rooms.json");
-  const service = new DshChatLocalService({}, { path }), reached = deferred(), release = deferred(), copyFile = fs.promises.copyFile;
-  let restoring;
+  const service = new DshChatLocalService({}, { path }), reached = deferred(), release = deferred(), writeFile = fs.promises.writeFile;
+  let restoring, closing, closed = false;
   try {
     await service.ready;
     const room = await service.createRoom({ name: "backup", autoDeliver: false });
     const snapshot = JSON.parse((await service.snapshotRun(room.id, "close-backup")).content);
     await service.send({ roomId: room.id, author: "human:fixture", authorKind: "human", text: "must remain", automaticDelivery: false });
-    fs.promises.copyFile = async (...args) => { if (args[0] === path) { reached.resolve(); await release.promise; } return copyFile(...args); };
+    fs.promises.writeFile = async (...args) => {
+      if (typeof args[0] === "string" && args[0].startsWith(`${path}.pre-restore.bak.`) && args[0].endsWith(".tmp")) {
+        reached.resolve(); await release.promise;
+      }
+      return writeFile(...args);
+    };
     syncBuiltinESMExports();
     restoring = service.restoreFromSnapshot(snapshot, { confirm: true }); restoring.catch(() => {});
     await reached.promise;
-    await service.close();
+    closing = service.close().then(() => { closed = true; });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(service.closed, true, "shutdown invalidates the unstaged restore immediately");
+    assert.equal(closed, false, "shutdown drains the quota-protected backup write before returning");
     const before = await readFile(path);
     release.resolve();
     await assert.rejects(restoring, /closed|关闭/);
+    await closing;
     assert.deepEqual(await readFile(path), before);
   } finally {
-    release.resolve(); fs.promises.copyFile = copyFile; syncBuiltinESMExports();
-    await Promise.allSettled([restoring]); await service.close(); await rm(directory, { recursive: true, force: true });
+    release.resolve(); fs.promises.writeFile = writeFile; syncBuiltinESMExports();
+    await Promise.allSettled([restoring, closing]); await service.close(); await rm(directory, { recursive: true, force: true });
   }
 });

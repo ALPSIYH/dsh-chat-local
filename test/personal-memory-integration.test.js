@@ -85,10 +85,10 @@ test('unavailable current-room authority cannot broaden reset recall into other 
   await h.send(h.second.id,'current reset episode',['a2']);
   const call=await waitFor(()=>h.calls[0]);
   await h.open(call);
-  const original=h.service.journal.readEvents.bind(h.service.journal);
-  h.service.journal.readEvents=async roomId=>{
+  const original=h.service.journal.readEventView.bind(h.service.journal);
+  h.service.journal.readEventView=async (roomId,options)=>{
     if(roomId===h.second.id)throw new Error('current memory authority is unavailable');
-    return original(roomId);
+    return original(roomId,options);
   };
   try{
     for(const options of [{},{roomId:h.second.id}]){
@@ -101,7 +101,7 @@ test('unavailable current-room authority cannot broaden reset recall into other 
       assert.doesNotMatch(JSON.stringify(memory),/private history from another work context/);
     }
     await assert.rejects(h.service.agentMemory('a2',{roomId:h.room.id}),/current room/);
-  }finally{h.service.journal.readEvents=original;}
+  }finally{h.service.journal.readEventView=original;}
   const repaired=await h.service.agentMemory('a2');
   assert.equal(repaired.context.roomId,h.second.id);
   assert.doesNotMatch(JSON.stringify(repaired),/private history from another work context/);

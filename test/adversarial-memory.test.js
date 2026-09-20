@@ -34,15 +34,15 @@ async function fixture(t) {
   return { service, room, alice, bob, directory, send, activate };
 }
 
-function holdRead(service, roomId) {
-  const entered = deferred(), release = deferred(), original = service.journal.readEvents.bind(service.journal);
+function holdRead(service, roomId, method = 'readEvents') {
+  const entered = deferred(), release = deferred(), original = service.journal[method].bind(service.journal);
   let armed = true;
-  service.journal.readEvents = async id => {
-    const events = await original(id);
+  service.journal[method] = async (id, ...options) => {
+    const events = await original(id, ...options);
     if (id === roomId && armed) { armed = false; entered.resolve(); await release.promise; }
     return events;
   };
-  return { entered: entered.promise, release: release.resolve, restore() { service.journal.readEvents = original; } };
+  return { entered: entered.promise, release: release.resolve, restore() { service.journal[method] = original; } };
 }
 
 test('a recall suspended after reading an old log cannot return discarded memory after a completed restore', async t => {
@@ -50,7 +50,7 @@ test('a recall suspended after reading an old log cannot return discarded memory
   const snapshot = JSON.parse((await h.service.snapshotRun(h.room.id, 'fixture')).content);
   await h.send('memory discarded by the restore');
   await h.service.roomMemory(h.room.id, 's');
-  const held = holdRead(h.service, h.room.id);
+  const held = holdRead(h.service, h.room.id, 'readEventView');
   const recalling = h.service.agentMemory('s', { roomId: h.room.id });
   recalling.catch(() => {});
   try {
@@ -66,15 +66,20 @@ test('a recall cannot complete after its service closes while a source read is s
   const h = await fixture(t);
   await h.send('private work before shutdown');
   await h.service.roomMemory(h.room.id, 's');
-  const held = holdRead(h.service, h.room.id);
+  const held = holdRead(h.service, h.room.id, 'readEventView');
   const recalling = h.service.agentMemory('s', { roomId: h.room.id });
   recalling.catch(() => {});
+  let closing, closed = false;
   try {
     await held.entered;
-    await h.service.close();
+    closing = h.service.close().then(() => { closed = true; });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(h.service.closed, true, 'shutdown invalidates read authority immediately');
+    assert.equal(closed, false, 'shutdown waits for the suspended memory refresh to settle');
     held.release();
     await assert.rejects(recalling, /closed|changed|superseded/);
-  } finally { held.release(); held.restore(); await Promise.allSettled([recalling]); }
+    await closing;
+  } finally { held.release(); held.restore(); await Promise.allSettled([recalling, closing]); }
 });
 
 for (const transition of ['close', 'reassign']) test(`an identity read suspended at persona IO refuses stale authority after ${transition}`, async t => {

@@ -1,6 +1,6 @@
 {
   "name": "dsh-chat-local",
-  "version": "0.17.2-local.1",
+  "version": "0.18.0-local.1",
   "description": "Native-workspace local multi-Agent group chat for DeepSeek Harness 0.1.5-rc.2.",
   "type": "module",
   "main": "./lib/index.js",
@@ -37,7 +37,12 @@
     "README.md",
     "CONTEXT.md",
     "CHANGELOG.md",
-    "LICENSE"
+    "LICENSE",
+    "scripts/persona-longitudinal.mjs",
+    "scripts/persona-longitudinal-fake.mjs",
+    "docs/persona-longitudinal.md",
+    "docs/storage-capacity.md",
+    "docs/memory-lifecycle.md"
   ],
   "scripts": {
     "build": "node scripts/build-client.mjs",
