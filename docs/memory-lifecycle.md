@@ -102,3 +102,7 @@ node --test --test-timeout=45000 test/persona-longitudinal.test.js
 索引反例測試涵蓋跨來源抑制、snapshot override、來源失效、reset、重讀證據、信念修訂、容量淘汰與省略計數。人格工具提供兩人各 12 個持續工作 episode、三個 Session、兩次重啟、0/3/6/12 凍結 checkpoint；probe 只在副本執行，不能流回主軌跡。完整方法見 [縱向人格試驗](persona-longitudinal.md)。32 次真實請求的實測結果由對應 run 檔案另行報告，本文不預先宣稱完成或人格已通過驗證。
 
 仍未完成：語義層自動歸納與矛盾解析、非文字知覺記憶、掛載前歷史的授權導入、分段冷檔／大來源分頁、物理刪除與保留期治理、多寫入程序協調，以及足夠獨立軌跡和人工盲評支持的人格穩定性結論。
+
+## 来源读取健康状态
+
+`memory.reads.unavailableSourceCount` 是本次程序最近核验仍不可读的来源数量；同一来源重新成功核验才清除。它不是所有历史都已被扫描的保证。即使 `failedReceipts` 为零，已知来源不可读、策略来源不完整、索引发生容量淘汰或背景整理报告错误，也会使 `/health` 显示 `memory_incomplete`；实时用量和正常读取次数不会改变健康 ETag。

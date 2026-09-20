@@ -14,6 +14,7 @@ export interface AuditHealth {
     checkedAt: number | null; active: boolean; ownership: "single-service-instance"; accounting: "logical-file-bytes";
   };
   memory: {
+    reads: { unavailableSourceCount: number; scope: "last-verified-source-state-this-process" };
     coverage: { history: "live-events-only"; modalities: string[]; measuredSince: number;
       countersScope: "this-service-process"; preMountHistoryImported: false; limitations: string[];
       observedReceipts: number; failedReceipts: number; unboundEvents: number; ambiguousIdentityEvents: number;

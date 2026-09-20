@@ -160,3 +160,21 @@ test("registered memory lifecycle tool binds its owner, enforces suppression and
   assert.equal((await h.execute("chat_identity","s1")).persona.hash,identity.persona.hash);
   assert.deepEqual(classifyToolExecution("chat_memory_update",{}),{riskClass:"low",action:"work"});
 });
+
+test("health exposes unreadable personal sources and clears that state after verified recovery", async t => {
+  const h = await mounted(t);
+  await h.service.observeSessionEvent("s1",{type:"user/message",data:{content:[{type:"text",text:"Health source observation"}]}});
+  const original = h.service.journal.readEventView.bind(h.service.journal);
+  h.service.journal.readEventView = async (id,...args) => { if(id === h.room.id) throw new Error("unreadable source"); return original(id,...args); };
+  try {
+    assert.equal((await h.execute("chat_recall","s1")).status,"partial");
+    const failed = (await h.request("/health")).value;
+    assert.equal(failed.status,"memory_incomplete");
+    assert.equal(failed.audit.memory.reads.unavailableSourceCount,1);
+    assert.equal(failed.audit.memory.coverage.failedReceipts,0,"a read failure is distinct from a missing new observation");
+  } finally { h.service.journal.readEventView = original; }
+  await h.execute("chat_recall","s1");
+  const repaired = (await h.request("/health")).value;
+  assert.equal(repaired.audit.memory.reads.unavailableSourceCount,0);
+  assert.equal(repaired.status,"ok");
+});

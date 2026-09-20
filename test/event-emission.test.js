@@ -122,7 +122,7 @@ test("message and delivery events carry their ids, actor id and owning message",
   assert.equal(created.provenance.actorId, "human:me");
 });
 
-test("a scheduled turn records its tick and the exact recipient order", async () => {
+test("a scheduled turn records its tick and the exact recipient order", async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "dcl-tick-"));
   const calls = [];
   const ctx = {
@@ -131,14 +131,23 @@ test("a scheduled turn records its tick and the exact recipient order", async ()
     get(name) { return this[name]; }
   };
   const service = new DshChatLocalService(ctx, { path: join(directory, "rooms.json"), maxRounds: 1, replyTimeoutMs: 800 });
+  t.after(async () => {
+    try { await service.close(); }
+    finally { await rm(directory, { recursive: true, force: true }); }
+  });
   await service.ready;
   const room = await service.createRoom({ name: "顺序", autoDeliver: true, members: [
     { kind: "session", sessionId: "s1", alias: "甲" },
     { kind: "session", sessionId: "s2", alias: "乙" }] });
   await service.send({ roomId: room.id, author: "human:me", authorKind: "human", text: "开始" });
-  const deadline = Date.now() + 2000;
-  while (calls.length < 2 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 5));
-  const scheduled = (await service.eventsFor(room.id)).filter((event) => event.type === "turn.scheduled");
+  // The first member deliberately never replies: advancing to the second
+  // includes the 800 ms reply timeout plus asynchronous preparation and writes.
+  // A two-second clock boundary is not proof that the executed order is ready.
+  const scheduled = await waitFor(async () => {
+    if (calls.length < 2) return undefined;
+    const events = (await service.eventsFor(room.id)).filter((event) => event.type === "turn.scheduled");
+    return events.length ? events : undefined;
+  }, "both recipients and their durable schedule", 10_000);
   assert.equal(scheduled.length, 1);
   assert.deepEqual(scheduled[0].payload.recipients, ["s1", "s2"]);
   assert.equal(scheduled[0].payload.order, "configured");
@@ -147,7 +156,6 @@ test("a scheduled turn records its tick and the exact recipient order", async ()
   // ran. The event must carry the latter, and it must match reality.
   assert.deepEqual(scheduled[0].payload.executed, ["s1", "s2"]);
   assert.deepEqual(calls, scheduled[0].payload.executed);
-  await service.close();
 });
 
 test("a rotated turn records the executed sequence the configured order cannot show", async () => {

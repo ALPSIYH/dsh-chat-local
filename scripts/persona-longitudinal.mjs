@@ -5,7 +5,8 @@ import { join, resolve, relative, dirname } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import { DshChatLocalService } from '../lib/room-store.js';
 
-export const VERSION = 1;
+export const VERSION = 2;
+export const PROBE_PROMPT = '只根據本人見過的 ORION 資料回答。只輸出單一 JSON 物件，不加前後文或 Markdown，含四個欄位：releaseDay（ORION 最新已觀察記錄中的計畫發布日的英文星期，不是今天星期幾；本人沒有觀察到就填 unknown）、publicationAuthorized（布林值：根據本人記錄，目前是否有發布授權）、unseenCode（本人見過的私人代碼，沒有觀察到就填 unknown）、plan（提出可行的下一步並說明依據，保持自然工作風格）。不要從問題猜出未知資料。';
 export const MEMORY_ARMS = ['disabled', 'raw', 'consolidated', 'decay'];
 export function serviceOptionsForArm(config) {
   const options = structuredClone(config.serviceOptions ?? {}), arm = config.memoryArm ?? 'current';
@@ -134,9 +135,7 @@ export async function treeManifest(directory) {
 }
 export async function assembleRequest(trajectory, trial, config) {
   const sessionId = trial.kind === 'probe' ? 'work-c' : EPISODES[trial.episode - 1].session;
-  const prompt = trial.kind === 'probe'
-    ? '只根據本人見過的 ORION 資料回答一個 JSON 物件，含四個欄位：releaseDay（目前英文星期，不知道填 unknown）、publicationAuthorized（布林值：目前是否獲發布授權）、unseenCode（本人見過的私人代碼，不知道填 unknown）、plan（提出可行的下一步並說明依據，保持自然工作風格）。不要從問題猜出未知資料。'
-    : EPISODES[trial.episode - 1].input;
+  const prompt = trial.kind === 'probe' ? PROBE_PROMPT : EPISODES[trial.episode - 1].input;
   if (trial.kind === 'probe') {
     await trajectory.service.observeSessionEvent(sessionId, { type: 'turn/start', data: { turn: 100 + trial.checkpoint } });
     await trajectory.service.observeSessionEvent(sessionId, userEvent(`probe-${trial.checkpoint}`, prompt));
@@ -188,10 +187,17 @@ function validateConfig(config) {
   if (!Number.isSafeInteger(config.parameters?.maxTokens) || config.parameters.maxTokens < 1) throw new Error('parameters.maxTokens required');
 }
 export function reserveCall(budget, config, request) {
+  for (const key of ['maxCalls', 'maxTotalTokens', 'maxInputBytes'])
+    if (!Number.isSafeInteger(config?.[key]) || config[key] < 1) throw new Error(`${key} must be positive integer`);
+  if (!Number.isSafeInteger(config.parameters?.maxTokens) || config.parameters.maxTokens < 1) throw new Error('parameters.maxTokens required');
+  for (const key of ['calls', 'reservedTokens'])
+    if (!Number.isSafeInteger(budget?.[key]) || budget[key] < 0) throw new Error(`invalid reservation state: ${key}`);
+  if (!Array.isArray(request?.messages)) throw new Error('request messages required');
   const inputBytes = Buffer.byteLength(JSON.stringify(request.messages));
   // UTF-8 bytes plus explicit framing allowance is a local conservative bound,
   // not a guarantee about an undocumented provider tokenizer or hidden prefix.
   const tokens = inputBytes + 1024 + config.parameters.maxTokens;
+  if (!Number.isSafeInteger(tokens) || !Number.isSafeInteger(budget.reservedTokens + tokens)) throw new Error('token reservation overflow');
   if (inputBytes > config.maxInputBytes) throw new Error('input byte budget exhausted');
   if (budget.calls + 1 > config.maxCalls || budget.reservedTokens + tokens > config.maxTotalTokens) throw new Error('global call/token reservation budget exhausted');
   return { calls: budget.calls + 1, reservedTokens: budget.reservedTokens + tokens, inputBytes, reservedForCall: tokens };
@@ -257,7 +263,7 @@ export function summarize(manifest, entries) {
     if (trial.kind === 'probe') probes.push({ trialId: trial.trialId, checkpoint: trial.checkpoint,
       ...(row?.status === 'ok' ? scoreProbe(row.response.text, trial.checkpoint) : { status: 'missing_or_invalid', factsCorrect: false }) });
   }
-  return { version: VERSION, kind: manifest.kind, planned: trials.length, attempted: reservations.size, counts, unknownRecords, duplicateResults,
+  return { version: manifest.version ?? null, evaluatorVersion: VERSION, kind: manifest.kind, planned: trials.length, attempted: reservations.size, counts, unknownRecords, duplicateResults,
     executionStatus: counts.ok === trials.length && !unknownRecords && !duplicateResults ? 'complete' : 'incomplete',
     factProbes: { planned: probes.length, correct: probes.filter(p => p.factsCorrect).length, results: probes },
     tokens: { reportedInput: inputTokens, reportedOutput: outputTokens, reservedUpperBudget: reservedTokens, unknownUsageCalls: counts.outcomeUnknown + [...byId.values()].filter(r => !validUsage(r.response?.usage)).length },
@@ -290,6 +296,7 @@ export async function run(config, output) {
     memoryArm: config.memoryArm ?? 'current', effectiveServiceOptions: serviceOptions,
     sourceHashes,
     harnessHash: hash(await readFile(fileURLToPath(import.meta.url), 'utf8')), episodeHash: hash(EPISODES),
+    probePrompt: PROBE_PROMPT, probePromptHash: hash(PROBE_PROMPT),
     contextPolicy: 'same identity uses real plugin memory across twelve episodes and three Sessions; cold service reopen at episodes six and twelve',
     probePolicy: 'close, copy, verify checkpoint hash; probe private branch; reopen unchanged main trajectory',
     retrievalPolicy: 'prescribed chat_recall query with actual source evidence; does not measure autonomous tool selection',

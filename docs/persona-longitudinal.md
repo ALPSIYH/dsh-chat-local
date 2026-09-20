@@ -32,6 +32,14 @@
 
 Probe 答案不能成為往後 episode 的記憶。每個人 12 個工作回答加 4 次 probe；兩人共 **32 次模型請求**。32 回答不是 32 個獨立樣本。
 
+## 探題協議與既有結果
+
+目前探題協議為 `VERSION = 2`。`releaseDay` 明確詢問「ORION 最新已觀察記錄中的計畫發布日的英文星期，不是今天星期幾」；要求只輸出單一 JSON，不加前後文或 Markdown。問題不提供任何英文星期答案，也不提供授權布林值。Manifest 同時保存完整 `probePrompt` 與 SHA-256，請求的 `schemaVersion` 與協議版本一致。
+
+協議 1 的「目前英文星期」可能被理解為今天星期幾；單寫「回答一個 JSON 物件」也沒有明確禁止前後散文。這是測量題的缺陷，不能把受影響結果直接歸因於記憶失效。修訂不會改寫舊 run 的請求、回答或原始摘要，也不會替舊答案補分。輸出目錄名稱如 `real-run-v2` 不是協議版本，以該目錄 `manifest.version` 為準。
+
+`recover` 保留來源 manifest 的 `version`，另列當前 `evaluatorVersion`，不把歷史資料標成新版探題。新舊探題結果分開報告；任何後續測試必須用新目錄、獨立分母與預算，不得拼接成功答案。評分器仍將前後附加散文的回答視為無法解析，不會擷取其中看似正確的 JSON 再計分。
+
 ## 真實注入與召回證據
 
 每次請求保存 `request-*.json`：實際 `nativeAgentContext` 文字及 hash、從該 Session 讀取的本人身分、人格 Markdown/hash、實際 `agentMemory` 召回結果、每條注入證據的 room/evidence/observation ID 與文字 hash、完整送出 messages 與 hash。

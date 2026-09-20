@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm, readFile, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
-import { buildPlan, PERSONAS, EPISODES, openTrajectory, prepareEpisode, recordAnswer, freezeCheckpoint, treeManifest,
+import { VERSION, PROBE_PROMPT, assembleRequest, buildPlan, PERSONAS, EPISODES, openTrajectory, prepareEpisode, recordAnswer, freezeCheckpoint, treeManifest,
   hash, reserveCall, run, summarize, recover, invokeAdapter, scoreProbe, boundRecall, serviceOptionsForArm } from '../scripts/persona-longitudinal.mjs';
 import { observedSessionItems } from '../lib/agent-memory.js';
 
@@ -16,6 +16,30 @@ test('plan has twelve dependent episodes and isolated checkpoints per person, no
   const plan = buildPlan(); assert.equal(plan.length, 32); assert.equal(EPISODES.length, 12);
   for (const p of PERSONAS) assert.deepEqual(plan.filter(t => t.personaId === p.id && t.kind === 'probe').map(t => t.checkpoint), [0, 3, 6, 12]);
   assert.throws(() => buildPlan([PERSONAS[0], PERSONAS[0]]), /duplicate/);
+});
+
+test('probe protocol asks for the observed project release day, requires one JSON object, and provides no answers', async t => {
+  assert.equal(VERSION, 2);
+  assert.match(PROBE_PROMPT, /ORION 最新已觀察記錄中的計畫發布日的英文星期，不是今天星期幾/);
+  assert.match(PROBE_PROMPT, /只輸出單一 JSON 物件，不加前後文或 Markdown/);
+  assert.doesNotMatch(PROBE_PROMPT, /Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday|LANTERN-739|publicationAuthorized\s*[：:]\s*(?:true|false)/u);
+  const dir = await fixture(t), h = await openTrajectory(join(dir, 'probe-zero'), PERSONAS[0], { initialize: true });
+  try {
+    const { request } = await assembleRequest(h, buildPlan()[0], config());
+    assert.equal(request.schemaVersion, VERSION);
+    assert.ok(request.messages.at(-1).content.endsWith(`目前工作：${PROBE_PROMPT}`));
+    assert.doesNotMatch(JSON.stringify(request.messages), /Friday|Tuesday|LANTERN-739/,
+      'an unobserved answer cannot enter the baseline probe through another request field');
+  } finally { await h.service.close(); }
+});
+
+test('summarizing an old experiment preserves its original protocol version', () => {
+  const old = { version: 1, kind: 'real', trials: [{ trialId: 'focused/probe-0', kind: 'probe', checkpoint: 0 }] };
+  const result = summarize(old, []);
+  assert.equal(result.version, 1);
+  assert.equal(result.evaluatorVersion, VERSION);
+  assert.equal(result.counts.missing, 1);
+  assert.equal(old.version, 1);
 });
 
 test('global budgets reserve failures and input before another adapter invocation', () => {
@@ -106,6 +130,9 @@ test('fake end-to-end run preserves actual injected persona/evidence and all 32 
   const dir = await fixture(t), output = join(dir, 'run');
   const result = await run(config(), output);
   assert.equal(result.executionStatus, 'complete', result.stopReason); assert.equal(result.counts.ok, 32);
+  assert.equal(result.version, VERSION);
+  const manifest = JSON.parse(await readFile(join(output, 'manifest.json'), 'utf8'));
+  assert.equal(manifest.probePrompt, PROBE_PROMPT); assert.equal(manifest.probePromptHash, hash(PROBE_PROMPT));
   assert.equal(result.factProbes.planned, 8); assert.match(result.personalityConclusion, /nonconclusive/);
   const request = JSON.parse(await readFile(join(output, 'request-focused-restart-and-recall.json'), 'utf8'));
   assert.equal(request.capture.personaHash, hash(PERSONAS[0].markdown));
@@ -157,4 +184,18 @@ test('host observation surface retains only visible text; binary perception and 
     content: [{ type: 'tool-result', toolCallId: 'read', isError: true, content: message.content }] } } });
   assert.equal(tool[0].text, 'visible file text'); assert.equal(tool[0].isError, true); assert.equal(tool[0].toolCallId, 'read');
   assert.doesNotMatch(JSON.stringify(tool), /PRIVATE/);
+});
+
+test('the exported reservation helper rejects missing, NaN and overflowing budgets before any call', () => {
+  const config={maxCalls:2,maxTotalTokens:20000,maxInputBytes:1000,parameters:{maxTokens:100}};
+  const budget={calls:0,reservedTokens:0},request={messages:[{role:'user',content:'bounded'}]};
+  for(const key of ['maxCalls','maxTotalTokens','maxInputBytes']) {
+    for(const value of [undefined,NaN,Infinity,0,-1,1.5]) assert.throws(()=>reserveCall(budget,{...config,[key]:value},request));
+  }
+  for(const maxTokens of [undefined,NaN,Infinity,0,-1,1.5]) assert.throws(()=>reserveCall(budget,{...config,parameters:{maxTokens}},request));
+  for(const key of ['calls','reservedTokens']) for(const value of [undefined,NaN,Infinity,-1,1.5])
+    assert.throws(()=>reserveCall({...budget,[key]:value},config,request));
+  assert.throws(()=>reserveCall(budget,{...config,parameters:{maxTokens:Number.MAX_SAFE_INTEGER}},request),/overflow/);
+  assert.throws(()=>reserveCall(budget,config,{}),/messages/);
+  assert.equal(reserveCall(budget,config,request).calls,1);
 });

@@ -33,7 +33,9 @@ test('shared Session appraisal partitions, revocations and target reset equal re
     action: 'record', validFrom: 3 + i, evidenceEventIds: ['e'] }, 3 + i));
   initial(index, events);
   const reference = projectAgentMemory({ agentId: 'alice', sources: [{ roomId: 'room', events }], limit: 100 });
-  const actual = recall(index, { limit: 100 });
+  // Request these appraisal targets explicitly: v2 source preference otherwise
+  // admits the supporting observation before an equal-score interpretation.
+  const actual = recall(index, { limit: 100, targetAgentIds: Array.from({ length: 128 }, (_, i) => `person-${i}`) });
   assert.equal(actual.judgements.length, 100);
   assert.deepEqual(actual.judgements.map(x => x.evidenceId), reference.judgements.map(x => x.evidenceId));
   append(index, [event('revoke', 'appraisal', { ...events.at(-1).payload, action: 'revoke', validFrom: 200 }, 200)]);
