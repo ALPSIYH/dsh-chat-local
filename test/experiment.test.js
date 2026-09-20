@@ -194,7 +194,7 @@ test("the whole source of the fingerprinted modules is part of the hash", () => 
     "experiment.js", "relationship.js", "agent-directory.js", "agent-memory.js", "agent-persona.js",
     "collaboration-workspace.js", "conversation-model.js", "document-reader.js", "document-reference.js",
     "event-log.js", "gate.js", "index.js", "native-conversations.js", "native-permissions.js",
-    "room-export.js", "room-journal.js", "room-store.js", "text-protocol.js", "work-protocol.js"
+    "restricted-read.js", "room-export.js", "room-journal.js", "room-store.js", "text-protocol.js", "work-protocol.js"
   ]);
   for (const [module, text] of sources) {
     const dependencies = text.matchAll(/(?:from\s+|import\s*\()(["'])\.\/([^"']+\.js)\1/gu);

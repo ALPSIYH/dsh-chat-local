@@ -165,8 +165,17 @@ function contractCoverageFor(segment) {
   const costs = segment.events.filter((event) => event.type === "injection.cost");
   if (costs.length === 0) return "no-injections";
   const config = manifestConfig(segment);
+  const recipientCoverage = new Map();
+  for (const event of segment.events) {
+    if (event.type !== "delivery.settled") continue;
+    const { deliveryId, member } = event.payload;
+    recipientCoverage.set(deliveryId,
+      (recipientCoverage.get(deliveryId) ?? true) && nonemptyText(member));
+  }
   return costs.some(({ payload }) => !Object.hasOwn(payload, "configHash")
     || !Object.hasOwn(payload, "modelAtDelivery")
+    || payload.modelObservation !== "before-delivery"
+    || recipientCoverage.get(payload.deliveryId) !== true
     || config?.version >= 2 && (payload.memorySampleStatus === undefined
       || config.personalMemory?.enabled === true && payload.personalMemoryStatus === undefined))
     ? "legacy-unverified" : "per-injection-checked";
@@ -186,7 +195,7 @@ function invalidSegmentReason(segment) {
   }
   if (!nonnegativeInteger(segment.startedAtTick)) return "run manifest states no valid startedAtTick";
   const config = manifestConfig(segment);
-  const injectionIds = new Set();
+  const injectionIds = new Set(), injectionMembers = new Map(), reachedMembers = new Map();
   for (const event of segment.events) {
     if (!nonnegativeInteger(event.tick)) return `event ${event.id} has an invalid tick`;
     const payload = event.payload;
@@ -200,6 +209,15 @@ function invalidSegmentReason(segment) {
       if (injectionIds.has(payload.deliveryId)) return `duplicate injection.cost for delivery ${payload.deliveryId}`;
       if (Object.hasOwn(payload, "configHash") && payload.configHash !== segment.configHash) {
         return `injection.cost ${event.id} configHash differs from its run manifest`;
+      }
+      if (Object.hasOwn(payload, "memorySampleStatus") && !["available", "unavailable"].includes(payload.memorySampleStatus)) {
+        return `injection.cost ${event.id} has an invalid memory sample status`;
+      }
+      if (Object.hasOwn(payload, "personalMemoryStatus") && !["available", "partial", "unavailable", "disabled"].includes(payload.personalMemoryStatus)) {
+        return `injection.cost ${event.id} has an invalid personal memory status`;
+      }
+      if (Object.hasOwn(payload, "modelObservation") && payload.modelObservation !== "before-delivery") {
+        return `injection.cost ${event.id} has an invalid model observation time`;
       }
       if (Object.hasOwn(payload, "modelAtDelivery")) {
         const model = payload.modelAtDelivery, member = payload.memberSessionId;
@@ -216,14 +234,24 @@ function invalidSegmentReason(segment) {
       if (config?.version >= 2 && payload.memorySampleStatus === "unavailable") {
         return `injection.cost ${event.id} memory sample was unavailable`;
       }
-      if (config?.version >= 2 && config.personalMemory?.enabled === true && payload.personalMemoryStatus === "partial") {
-        return `injection.cost ${event.id} enabled personal memory was only partially available`;
+      if (config?.version >= 2 && config.personalMemory?.enabled === true
+        && Object.hasOwn(payload, "personalMemoryStatus") && payload.personalMemoryStatus !== "available") {
+        return `injection.cost ${event.id} enabled personal memory was not fully available (${payload.personalMemoryStatus})`;
       }
+      if (nonemptyText(payload.memberSessionId)) injectionMembers.set(payload.deliveryId, payload.memberSessionId);
       injectionIds.add(payload.deliveryId);
     }
     if (event.type === "delivery.settled" && (!nonemptyText(payload.deliveryId)
       || !["queued", "sent", "delivered", "working", "replied", "passed", "failed", "superseded"].includes(payload.status))) {
       return `delivery.settled ${event.id} has an invalid deliveryId or status`;
+    }
+    if (event.type === "delivery.settled" && Object.hasOwn(payload, "member") && !nonemptyText(payload.member)) {
+      return `delivery.settled ${event.id} has an invalid recipient member`;
+    }
+    if (event.type === "delivery.settled" && nonemptyText(payload.member)) {
+      const previous = reachedMembers.get(payload.deliveryId);
+      if (previous && previous !== payload.member) return `delivery ${payload.deliveryId} has conflicting recipient members`;
+      reachedMembers.set(payload.deliveryId, payload.member);
     }
     if (event.type === "ledger.transition") {
       if (!nonemptyText(payload.entryId)) return `ledger.transition ${event.id} has no entryId`;
@@ -233,6 +261,11 @@ function invalidSegmentReason(segment) {
       if (payload.kind === "dispute" && !nonemptyText(payload.status)) {
         return `dispute ${event.id} has no status`;
       }
+    }
+  }
+  for (const [id, member] of injectionMembers) {
+    if (reachedMembers.has(id) && reachedMembers.get(id) !== member) {
+      return `injection.cost delivery ${id} member differs from its delivery recipient`;
     }
   }
   return null;
@@ -440,7 +473,7 @@ export async function evaluate({ statePath, roomId, minRuns = MIN_RUNS, observat
   }
   if (invalid.length > 0) notes.push("Invalid input was excluded and is listed in invalid. This is a partial report, not a clean dataset validation.");
   if (runs.some((run) => run.contractCoverage === "legacy-unverified")) {
-    notes.push("Legacy injection.cost records lack per-injection configuration, runtime-model or memory availability coverage. Their within-run configuration is unverified; descriptive acceptance does not certify configuration constancy or a fully delivered memory treatment.");
+    notes.push("Legacy injection or delivery records lack per-injection configuration, runtime-model observation time, recipient or memory availability coverage. Their within-run configuration is unverified; descriptive acceptance does not certify configuration constancy or a fully delivered memory treatment.");
   }
   return { format: EVAL_FORMAT, version: EVAL_VERSION,
     dependentVariableVersion: DEPENDENT_VARIABLE_VERSION,

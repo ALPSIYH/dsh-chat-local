@@ -1,6 +1,6 @@
 {
   "name": "dsh-chat-local",
-  "version": "0.17.1-local.1",
+  "version": "0.17.2-local.1",
   "description": "Native-workspace local multi-Agent group chat for DeepSeek Harness 0.1.5-rc.2.",
   "type": "module",
   "main": "./lib/index.js",
