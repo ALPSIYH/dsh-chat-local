@@ -77,6 +77,37 @@ test('same persona reaches a fresh session and reset recall cannot bypass active
   assert.ok(cost?.payload.personaHash);assert.equal(cost.payload.personaChars,'# Personality\nUse concrete evidence and concise answers.'.length);
 });
 
+test('unavailable current-room authority cannot broaden reset recall into other work',async t=>{
+  const h=await setup(t);
+  await h.send(h.room.id,'private history from another work context');
+  await h.service.roomMemory(h.room.id,'a1');
+  await h.service.startRun(h.second.id,{arm:'reset_per_episode',appliedBy:'human'});
+  await h.send(h.second.id,'current reset episode',['a2']);
+  const call=await waitFor(()=>h.calls[0]);
+  await h.open(call);
+  const original=h.service.journal.readEvents.bind(h.service.journal);
+  h.service.journal.readEvents=async roomId=>{
+    if(roomId===h.second.id)throw new Error('current memory authority is unavailable');
+    return original(roomId);
+  };
+  try{
+    for(const options of [{},{roomId:h.second.id}]){
+      const memory=await h.service.agentMemory('a2',options);
+      assert.equal(memory.context?.roomId,h.second.id,'unavailable authority must preserve the current room scope');
+      assert.equal(memory.context?.authority,'unavailable');
+      assert.deepEqual(memory.experiences,[]);
+      assert.deepEqual(memory.judgements,[]);
+      assert.ok(memory.unavailableSources.includes(h.second.id));
+      assert.doesNotMatch(JSON.stringify(memory),/private history from another work context/);
+    }
+    await assert.rejects(h.service.agentMemory('a2',{roomId:h.room.id}),/current room/);
+  }finally{h.service.journal.readEvents=original;}
+  const repaired=await h.service.agentMemory('a2');
+  assert.equal(repaired.context.roomId,h.second.id);
+  assert.doesNotMatch(JSON.stringify(repaired),/private history from another work context/);
+  await h.end(call);
+});
+
 test('native context injects the same person outside groups and never resamples an active group turn',async t=>{
   const h=await setup(t);
   const persona=await h.service.directory.persona(h.alice.id);

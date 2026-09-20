@@ -62,7 +62,7 @@ test("health reports the audit side channel and the state version", async (t) =>
   const { request } = await boot(t);
   const health = await request("/health");
   assert.equal(health.status, "ok");
-  assert.equal(health.stateVersion, 16);
+  assert.equal(health.stateVersion, 17);
   assert.equal(typeof health.audit.appended, "number");
   assert.equal(typeof health.audit.failed, "number");
 });

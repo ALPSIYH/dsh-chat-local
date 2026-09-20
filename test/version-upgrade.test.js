@@ -52,10 +52,10 @@ test("a state file from the version before the gate keeps a byte-identical backu
   try {
     await next.ready;
     assert.equal(await readFile(`${path}.v15.bak`, "utf8"), bytes, "the pre-migration bytes are kept verbatim");
-    assert.equal(next.stateVersion(), 16);
+    assert.equal(next.stateVersion(), 17);
     assert.equal((await next.resolveRoom(room.id)).policy.gate, true, "the switch survives the migration");
     const saved = JSON.parse(await readFile(path, "utf8"));
-    assert.equal(saved.version, 16);
+    assert.equal(saved.version, 17);
     assert.equal(saved.rooms[0].policy.gate, true);
   } finally {
     await next.close();
@@ -82,9 +82,9 @@ test("a state file that carries no version gets a named backup, not .vundefined.
       "the pre-migration bytes are kept under a name that says what the file is");
     await assert.rejects(access(`${path}.vundefined.bak`), { code: "ENOENT" },
       "no backup may be named after a JavaScript placeholder");
-    assert.equal(next.stateVersion(), 16);
+    assert.equal(next.stateVersion(), 17);
     assert.equal((await next.resolveRoom(room.id)).name, "无版本");
-    assert.equal(JSON.parse(await readFile(path, "utf8")).version, 16);
+    assert.equal(JSON.parse(await readFile(path, "utf8")).version, 17);
   } finally {
     await next.close();
     await rm(directory, { recursive: true, force: true });

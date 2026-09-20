@@ -1,5 +1,12 @@
 import type { DshChatLocalConfig } from "./index.js";
 
+export interface AuditHealth {
+  appended: number; failed: number; lastError: string | null; droppedCount: number; dropped: any[];
+  pendingRecovery: number; pendingRooms: string[]; recoveredOperations: number;
+  journal: { pendingOperations: number; recoveredOperations: number; checkpointPending: boolean;
+    lastError: string | null; syncError: string | null };
+}
+
 export declare class DshChatLocalService {
   constructor(ctx: any, config?: DshChatLocalConfig);
   workspace: {
@@ -54,9 +61,9 @@ export declare class DshChatLocalService {
    * then report the log's health. It joins only work already issued: it never
    * waits for a turn to end, appends nothing of its own, and is a read.
    */
-  settledAudit(): Promise<{ appended: number; failed: number; lastError: any; droppedCount: number; dropped: any[] }>;
+  settledAudit(): Promise<AuditHealth>;
   eventsFor(roomId: string): Promise<any[]>;
-  logHealth(): { appended: number; failed: number; lastError: any; droppedCount: number; dropped: any[] };
+  logHealth(): AuditHealth;
   stateVersion(): number;
   resolveRoom(reference: string): Promise<any>;
   createRoom(input: any): Promise<any>;

@@ -106,7 +106,7 @@ test("an actual anchor filesystem failure is visible and a repaired restart pres
     const appended = await reopened.append("room", { type: "after-repair" });
     assert.ok(appended);
     const events = await reopened.read("room");
-    assert.deepEqual(events.map(event => event.type), ["before", "line-with-failed-anchor", "after-repair"]);
+    assert.deepEqual(events.map(event => event.type), ["before", "after-repair"]);
     assert.deepEqual(verifyChain(events), { ok: true, brokenAt: null });
     assert.equal(await readFile(anchor, "utf8"), appended.hash);
   } finally { await log.drain(); await rm(directory, { recursive: true, force: true }); }

@@ -56,6 +56,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { EventLog, eventLogPath, verifyChain } from "../lib/event-log.js";
+import { assertAuditSettled } from "../lib/room-journal.js";
 import { MIN_RUNS, RESET_CONTRACT, DEPENDENT_VARIABLE_VERSION, dependentVariables, dispersion, hasInteraction,
   injectionConfigFor, runSegments } from "../lib/experiment.js";
 
@@ -409,6 +410,7 @@ function number(value, digits = 3) {
 export async function evaluate({ statePath, roomId, minRuns = MIN_RUNS, observation = false },
   log = new EventLog(statePath)) {
   validateMinimum(minRuns);
+  await assertAuditSettled(statePath, roomId);
   const { runs, skipped, invalid } = await collectRuns(statePath, roomId, log);
   const groups = groupsOf(runs, minRuns, observation);
   const ready = groups.filter((group) => group.sufficient);

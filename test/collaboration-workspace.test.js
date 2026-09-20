@@ -175,7 +175,7 @@ test("loading an incomplete v15 identity migration persists its repair before re
   const reopened=new DshChatLocalService(h.ctx,{path:h.path});
   try{
     const loaded=await reopened.resolveRoom(room.id),disk=JSON.parse(await readFile(h.path,"utf8"));
-    assert.ok(loaded.members[0].agentId);assert.equal(disk.version,16);assert.equal(disk.workspace.agents.length,1);assert.equal(disk.workspace.participations.length,1);
+    assert.ok(loaded.members[0].agentId);assert.equal(disk.version,17);assert.equal(disk.workspace.agents.length,1);assert.equal(disk.workspace.participations.length,1);
     assert.equal(disk.rooms[0].members[0].agentId,loaded.members[0].agentId);assert.equal(disk.rooms[0].members[0].participationId,loaded.members[0].participationId);
     assert.deepEqual(disk.rooms[0].messages,old.rooms[0].messages);assert.deepEqual(disk.rooms[0].ledger,old.rooms[0].ledger);
   }finally{await reopened.close();}
@@ -523,7 +523,9 @@ test("an inner dispatch save failure clears the phantom queue and retry actually
   await assert.rejects(h.service.workspace.startDraft(draft.id,{expectedRevision:draft.revision}));
   assert.equal(h.calls.length,0);assert.equal(h.service.state.workspace.drafts[0].start.state,"saved");assert.notEqual(h.service.state.rooms[0].orchestration.state,"queued");assert.ok(!h.service.state.rooms[0].messages[0].dispatchAttempted);
   const result=await h.service.workspace.startDraft(draft.id,{expectedRevision:draft.revision});
-  for(let n=0;n<50&&!h.calls.length;n++)await new Promise(resolve=>setTimeout(resolve,5));
+  // Await durable preparation; a 250 ms wall-clock limit measured fsync load.
+  const deadline=Date.now()+5_000;
+  while(!h.calls.length&&Date.now()<deadline)await new Promise(resolve=>setTimeout(resolve,5));
   assert.equal(h.calls.length,1);assert.equal(h.created,1);assert.equal(result.state,"started");await h.service.workspace.startDraft(draft.id,{expectedRevision:draft.revision});assert.equal(h.calls.length,1);
 }));
 

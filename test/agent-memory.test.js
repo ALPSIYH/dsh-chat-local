@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { projectAgentMemory, renderPersonalMemory, observedSessionItems } from '../lib/agent-memory.js';
+import { projectAgentMemory, renderPersonalMemory, personalRecallContext, observedSessionItems } from '../lib/agent-memory.js';
 
 test('native surface extraction records visible tool text and rejects private non-surface fields', () => {
   const result = observedSessionItems({ type: 'tool/result', seq: 8, data: { turn: 2, step: 3,
@@ -49,6 +49,29 @@ const event = (id, type, payload, at = 1) => ({ id, type, payload, at, tick: at 
 const source = (roomId, events) => ({ roomId, events: events.map(item => ({ ...item, provenance: { roomId, ...item.provenance } })) });
 const message = (id, text, at = 1) => event(id, 'message.created', { messageId: id, text }, at);
 const seen = (id, agentId, messageIds, at = 2) => event(id, 'memory.observed', { observerAgentId: agentId, messageIds }, at);
+
+test('missing authority and a readable empty log have different recall scopes', () => {
+  const sources = [source('other', [message('m', 'other work'), seen('receipt', 'person', ['m'])])];
+  const context = personalRecallContext({ roomId: 'current' });
+  assert.equal(context.authority, 'unavailable');
+  assert.deepEqual(projectAgentMemory({ agentId: 'person', sources, context }).experiences, []);
+  assert.equal(personalRecallContext({ roomId: 'current', events: [], arm: 'persistent' }), undefined);
+  assert.equal(projectAgentMemory({ agentId: 'person', sources }).experiences.length, 1);
+  assert.equal(personalRecallContext(), undefined, 'native work without a room has no room authority to resolve');
+});
+
+test('reset scope requires a valid clear from its own room and unknown authority always yields no recall', () => {
+  const reset = { type: 'relationship.intervention', at: 10, provenance: { roomId: 'current' },
+    payload: { action: 'clear', appliedBy: 'arm', memoryScope: 'all', memoryVersion: 2 } };
+  assert.deepEqual(personalRecallContext({ roomId: 'current', events: [reset], arm: 'reset_per_episode' }),
+    { roomId: 'current', afterAt: 10 });
+  const foreign = { ...reset, at: 99, provenance: { roomId: 'other' } };
+  assert.deepEqual(personalRecallContext({ roomId: 'current', events: [reset, foreign], arm: 'reset_per_episode' }),
+    { roomId: 'current', afterAt: 10 });
+  const sources = [source('current', [message('m', 'must remain unavailable', 1e20), seen('r', 'person', ['m'], 1e20)])];
+  assert.deepEqual(projectAgentMemory({ agentId: 'person', sources,
+    context: personalRecallContext({ roomId: 'current' }) }).experiences, []);
+});
 
 test('personal memory follows stable identity across sessions and contains only observed content', () => {
   const sources = [source('room-a', [message('a', 'observed work'), message('hidden', 'never delivered'), seen('s1', 'person-a', ['a'])]),

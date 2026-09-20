@@ -675,7 +675,9 @@ test("human editing a submitted task cannot retain a stale in_review status afte
 });
 
 test("idle monitoring preserves more than 100 work events and their idempotency keys", async () => {
-  const h = await harness({ monitorMinuteMs: 10, monitorIntervalMs: 25 });
+  // This test deliberately fsyncs over 100 mutations inside one active turn;
+  // its contract is history retention, not the separate reply-timeout tests.
+  const h = await harness({ monitorMinuteMs: 10, monitorIntervalMs: 25, replyTimeoutMs: 60_000 });
   try {
     const room = await h.room();
     const source = await h.activate(room);

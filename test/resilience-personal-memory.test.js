@@ -1,0 +1,55 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { DshChatLocalService } from '../lib/room-store.js';
+
+const moduleUrl = new URL('../lib/room-store.js', import.meta.url).href;
+const nativeMessage = (id, text) => ({ type: 'user/message', data: { id, content: [{ type: 'text', text }] } });
+const ctx = { get() { return undefined; } };
+
+test('forced restart preserves observation ownership through room reset and Session reassignment', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'dcl-memory-crash-'));
+  const statePath = join(directory, 'rooms.json');
+  let service = new DshChatLocalService(ctx, { path: statePath });
+  t.after(async () => { await service.close(); await rm(directory, { recursive: true, force: true }); });
+  await service.ready;
+  const alice = await service.directory.save({ operationId: 'person-a', profile: { alias: 'same alias' } });
+  const bob = await service.directory.save({ operationId: 'person-b', profile: { alias: 'same alias' } });
+  const room = await service.createRoom({ name: 'old work', autoDeliver: false, members: [{ kind: 'session', sessionId: 'reused', alias: 'local', agentId: alice.id }] });
+  const elsewhere = await service.createRoom({ name: 'other work', autoDeliver: false, members: [{ kind: 'session', sessionId: 'alice-elsewhere', alias: 'different local name', agentId: alice.id }] });
+  const ownBob = await service.createRoom({ name: 'Bob work', autoDeliver: false, members: [{ kind: 'session', sessionId: 'bob-native', alias: 'local', agentId: bob.id }] });
+  assert.ok(elsewhere.id && ownBob.id);
+  await service.send({ roomId: room.id, author: 'human:me', authorKind: 'human', text: 'OLD_ROOM_RECEIPT', automaticDelivery: false });
+  await service.roomMemory(room.id, 'reused');
+  await service.observeSessionEvent('reused', nativeMessage('alice-native', 'ALICE_NATIVE_RETAINED'));
+  await service.observeSessionEvent('bob-native', nativeMessage('bob-native', 'BOB_PRIVATE_NATIVE'));
+  await service.close();
+  const script = `
+    import {DshChatLocalService} from ${JSON.stringify(moduleUrl)};
+    const service=new DshChatLocalService({}, {path:${JSON.stringify(statePath)}});await service.ready;
+    await service.relationshipIntervention(${JSON.stringify(room.id)},{action:'clear',memoryScope:'all',appliedBy:'human',mechanism:'process exit fixture'});
+    await service.removeMember(${JSON.stringify(room.id)},'reused');
+    await service.addMember(${JSON.stringify(room.id)},{kind:'session',sessionId:'reused',alias:'local',agentId:${JSON.stringify(bob.id)}});
+    await service.observeSessionEvent('reused',${JSON.stringify(nativeMessage('ambiguous', 'AMBIGUOUS_NATIVE_MUST_NOT_BE_ATTRIBUTED'))});
+    await service.observeSessionEvent('alice-elsewhere',${JSON.stringify(nativeMessage('after-clear', 'ALICE_NEW_NATIVE'))});
+    process.exit(77);
+  `;
+  const crash = spawnSync(process.execPath, ['--input-type=module', '-e', script], { encoding: 'utf8', timeout: 10000 });
+  assert.equal(crash.status, 77, crash.stderr);
+  service = new DshChatLocalService(ctx, { path: statePath });
+  await service.ready;
+  const aliceMemory = JSON.stringify(await service.agentMemory('alice-elsewhere'));
+  const bobMemory = JSON.stringify(await service.agentMemory('reused', { roomId: room.id }));
+  assert.match(aliceMemory, /ALICE_NATIVE_RETAINED/);
+  assert.match(aliceMemory, /ALICE_NEW_NATIVE/);
+  assert.doesNotMatch(aliceMemory, /OLD_ROOM_RECEIPT|BOB_PRIVATE_NATIVE|AMBIGUOUS_NATIVE_MUST_NOT_BE_ATTRIBUTED/);
+  assert.match(bobMemory, /BOB_PRIVATE_NATIVE/);
+  assert.doesNotMatch(bobMemory, /OLD_ROOM_RECEIPT|ALICE_NATIVE_RETAINED|ALICE_NEW_NATIVE|AMBIGUOUS_NATIVE_MUST_NOT_BE_ATTRIBUTED/);
+  await assert.rejects(service.agentMemory('reused'), /unambiguous/);
+  await service.roomMemory(room.id, 'reused');
+  assert.match(JSON.stringify(await service.agentMemory('reused', { roomId: room.id })), /OLD_ROOM_RECEIPT/, 'Bob may remember old shared history only after he actually rereads it');
+  assert.doesNotMatch(JSON.stringify(await service.agentMemory('alice-elsewhere')), /OLD_ROOM_RECEIPT/, 'Bob’s new receipt does not restore Alice’s forgotten projection');
+});

@@ -35,7 +35,7 @@ test("v11 migration keeps legacy messages, work and Session bindings intact",()=
   const original=structuredClone(state.rooms[0]);await h.service.close();await writeFile(h.path,JSON.stringify(state));
   const restored=new DshChatLocalService(h.ctx,{path:h.path});
   try{
-    await restored.ready;const saved=JSON.parse(await readFile(h.path,"utf8"));assert.equal(saved.version,16);assert.equal(saved.groups.length,1);assert.equal(saved.rooms.length,1);
+    await restored.ready;const saved=JSON.parse(await readFile(h.path,"utf8"));assert.equal(saved.version,17);assert.equal(saved.groups.length,1);assert.equal(saved.rooms.length,1);
     for(const member of saved.rooms[0].members){
       assert.ok(member.agentId);assert.equal(member.agentRevision,1);assert.ok(member.participationId);
       assert.ok(saved.workspace.agents.some(agent=>agent.id===member.agentId));

@@ -1,14 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DshChatLocalService, relationshipDigest, RELATIONSHIP_DIGEST_MAX_CHARS } from "../lib/room-store.js";
 import { verifyChain } from "../lib/event-log.js";
 import { deriveRelationships, latestRelationships, RELATIONSHIP_VERSION } from "../lib/relationship.js";
 
-async function waitFor(predicate, label = "condition") {
-  const deadline = Date.now() + 2_000;
+async function waitFor(predicate, label = "condition", timeoutMs = 2_000) {
+  const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const value = await predicate();
     if (value) return value;
@@ -38,7 +38,7 @@ async function harness(options = {}) {
     },
     get(name) { return this[name]; }
   };
-  const service = new DshChatLocalService(ctx, { path: join(directory, "rooms.json"), maxRounds: 1, replyTimeoutMs: 800 });
+  const service = new DshChatLocalService(ctx, { path: join(directory, "rooms.json"), maxRounds: 1, replyTimeoutMs: options.replyTimeoutMs ?? 800 });
   await service.ready;
   const room = await service.createRoom({ name: "事件测试", autoDeliver: options.autoDeliver ?? false,
     members: [{ kind: "session", sessionId: "s1", alias: "成员" }] });
@@ -165,14 +165,14 @@ test("a rotated turn records the executed sequence the configured order cannot s
     { kind: "session", sessionId: "s1", alias: "甲" },
     { kind: "session", sessionId: "s2", alias: "乙" }] });
   await first.send({ roomId: room.id, author: "human:me", authorKind: "human", text: "一" });
-  await waitFor(() => deliveries.length >= 2, "both deliveries of the first turn");
+  await waitFor(() => deliveries.length >= 2, "both deliveries of the first turn", 10_000);
   // Quiesce before the second turn, so it is a fresh schedule rather than a
   // superseded run: the rotation offset is the only thing that differs.
   await first.close();
   const second = new DshChatLocalService(ctx, { path, maxRounds: 1, replyTimeoutMs: 800 });
   await second.ready;
   await second.send({ roomId: room.id, author: "human:me", authorKind: "human", text: "二" });
-  await waitFor(() => deliveries.length >= 4, "both deliveries of the second turn");
+  await waitFor(() => deliveries.length >= 4, "both deliveries of the second turn", 10_000);
   const scheduled = (await second.eventsFor(room.id)).filter((event) => event.type === "turn.scheduled");
   assert.equal(scheduled.length, 2);
   // The configured order never changes, so it alone could not tell these apart.
@@ -384,7 +384,9 @@ test("a member who replies before the sent transition flushes still gets a deliv
  * transition from a room that no longer exists.
  */
 test("a delivery transition on the room a restore replaces is never appended", async () => {
-  const h = await harness({ autoDeliver: true });
+  // Hold a live turn through several durable saves; timeout behavior has its
+  // own virtual-clock coverage and must not decide this restore assertion.
+  const h = await harness({ autoDeliver: true, replyTimeoutMs: 60_000 });
   try {
     await h.service.send({ roomId: h.room.id, author: "human:me", authorKind: "human", text: "开始" });
     const call = await waitFor(() => h.calls[0], "the member delivery");
@@ -430,32 +432,26 @@ test("a delivery transition on the room a restore replaces is never appended", a
   }
 });
 
-/**
- * A flush that throws is the save's to report — the state write already landed,
- * and the append that failed is the one the caller may want to know about. What
- * it must not do is stay stored as a rejected promise: `settledAudit` joins that
- * promise, and a read that runs later would then reject with a failure from a
- * save it never made. The append here is made to throw even though the log's own
- * writer counts and swallows its failures, because that is the one way the flush
- * itself can reject.
- */
-test("a flush that throws is not left as a rejected promise for a later settled read", async () => {
+test("a thrown audit flush retains its committed obligation and later save repairs it", async () => {
   const h = await harness();
   try {
     const append = h.service.eventLog.append.bind(h.service.eventLog);
     h.service.eventLog.append = () => { throw new Error("audit flush exploded"); };
-    // One policy call queues exactly one append, and the save that claims it
-    // reports the failure.
-    await assert.rejects(() => h.service.setRoomPolicy(h.room.id, { defaultActionMode: "discuss_only",
-      expectedRevision: 1, gate: true }), /audit flush exploded/);
-    h.service.eventLog.append = append;
-    // The state is durable and the append never ran, so the log is short exactly
-    // one event. A later settled read reports that instead of rejecting.
+    // State already committed: report its result, retain the exact missing fact
+    // and refuse incomplete history instead of inviting a duplicate mutation.
+    await h.service.setRoomPolicy(h.room.id, { defaultActionMode: "discuss_only",
+      expectedRevision: 1, gate: true });
     const health = await h.service.settledAudit();
-    assert.equal(health.failed, 0, "the append never ran, so nothing was counted as failed");
+    assert.equal(health.failed, 0, "the append never ran, so EventLog counts no failure");
+    assert.equal(health.journal.pendingOperations, 1);
+    assert.match(health.journal.lastError, /audit flush exploded/);
+    await assert.rejects(h.service.eventsFor(h.room.id), /committed audit recovery is incomplete/);
+    h.service.eventLog.append = append;
+    await h.service.setRoomAutoDeliver(h.room.id, true);
     const events = await h.service.eventsFor(h.room.id);
-    assert.deepEqual(events.filter((event) => event.type === "message.created"
-      && event.payload.authorKind === "system"), []);
+    assert.equal(events.filter((event) => event.type === "message.created"
+      && event.payload.authorKind === "system").length, 1);
+    assert.equal(h.service.logHealth().journal.pendingOperations, 0);
     assert.deepEqual(verifyChain(events), { ok: true, brokenAt: null });
   } finally {
     await h.service.close();
@@ -490,15 +486,18 @@ test("a restart records an event for every in-flight delivery it recovers as fai
   const room = await first.createRoom({ name: "重启", autoDeliver: true, members: [{ kind: "session", sessionId: "s1", alias: "甲" }] });
   const sent = await first.send({ roomId: room.id, author: "human:me", authorKind: "human", text: "一" });
   await waitFor(() => deliveries.length === 1, "the in-flight delivery");
-  // Dispatched but never observed, so the delivery is still in flight when the
-  // process ends: shutdown does not settle it.
+  await first.settledAudit();
+  // Freeze a crash image before graceful close settles its active captures.
+  // Actual SIGKILL interruption points are covered by crash-recovery.test.js.
+  const crashDirectory = await mkdtemp(join(tmpdir(), "dcl-restart-image-"));
+  t.after(() => rm(crashDirectory, { recursive: true, force: true }));
+  await cp(directory, crashDirectory, { recursive: true });
+  const crashPath = join(crashDirectory, "rooms.json");
   await first.close();
-  const inFlight = JSON.parse(await readFile(path, "utf8")).rooms[0].messages.flatMap((message) => message.deliveries);
-  // Dispatched, never observed: whichever in-flight status it reached, shutdown
-  // does not settle it.
+  const inFlight = JSON.parse(await readFile(crashPath, "utf8")).rooms[0].messages.flatMap((message) => message.deliveries);
   assert.equal(inFlight.length, 1);
   assert.ok(["queued", "sent", "delivered", "working"].includes(inFlight[0].status), inFlight[0].status);
-  const second = new DshChatLocalService(ctx, { path, maxRounds: 1, replyTimeoutMs: 60_000 });
+  const second = new DshChatLocalService(ctx, { path: crashPath, maxRounds: 1, replyTimeoutMs: 60_000 });
   t.after(() => second.close());
   await second.ready;
   const recovered = (await second.messages(room.id)).flatMap((message) => message.deliveries);
@@ -676,7 +675,7 @@ async function ledgerHarness() {
       const index = calls.length;
       const source = await service.send({ roomId: room.id, author: "human:me", authorKind: "human",
         text, mentions: [sessionId] });
-      const call = await waitFor(() => calls[index], "a participant delivery");
+      const call = await waitFor(() => calls[index], "a participant delivery", 10_000);
       const turn = index + 1;
       await service.observeSessionEvent(call.to, { type: "turn/start", data: { turn } });
       await service.observeSessionEvent(call.to, { type: "user/message", data: { content: [{ type: "text",

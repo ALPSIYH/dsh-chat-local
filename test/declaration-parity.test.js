@@ -38,6 +38,8 @@ const LEADING_MODIFIERS = /^(?:(?:public|private|protected|readonly|static|abstr
 
 /** The method and property names declared on the class in a `.d.ts` source. */
 function declaredNames(source) {
+  // Other exported interfaces are not members of the service class.
+  source = source.slice(source.indexOf("export declare class DshChatLocalService"));
   const names = new Set();
   let depth = 0;
   for (const raw of source.split(/\r?\n/)) {

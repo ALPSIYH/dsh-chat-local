@@ -3,11 +3,9 @@
  * Read-only offline verification of one room's event log.
  *
  * The event log is an append-only JSONL file per room with a SHA-256 chain and a
- * head anchor beside it. Nothing in the running plugin verifies a live log —
- * `verifyChain` is used in production only on an imported snapshot — so this is
- * the entry point that makes the README's "back up separately and verify
- * offline" true: it opens the state directory (or a restored copy of one) and
- * recomputes the chain and the anchor.
+ * head anchor beside it. The writer also verifies a cold or changed log. This
+ * offline entry point recomputes the chain and anchor and refuses unfinished
+ * state/log recovery instead of quietly treating an incomplete history as done.
  *
  * Usage:
  *   node scripts/verify-event-log.mjs <roomId> [--state <rooms.json>]
@@ -19,6 +17,7 @@ import { access, readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { EventLog, eventLogHeadPath, eventLogPath, verifyChain } from "../lib/event-log.js";
+import { assertAuditSettled } from "../lib/room-journal.js";
 
 const USAGE = "usage: node scripts/verify-event-log.mjs <roomId> [--state <rooms.json>]";
 /** The anchor's null sentinel; see `NO_HEAD` in lib/event-log.js. It is not a hash. */
@@ -57,6 +56,8 @@ async function main() {
     return 0;
   }
   const logPath = eventLogPath(statePath, roomId);
+  try { await assertAuditSettled(statePath, roomId); }
+  catch (error) { emit({ roomId, log: logPath, ok: false, error: String(error.message) }); return 1; }
   try {
     await access(logPath);
   } catch {

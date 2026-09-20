@@ -206,20 +206,20 @@ test("an append after replace on the same instance keeps the chain continuous", 
   assert.deepEqual(verifyChain(await log.read("r1")), { ok: true, brokenAt: null });
 });
 
-test("a failed anchor write never forks the chain the line already joined", async () => {
+test("an invalid anchor path refuses an append before mutation and resumes after repair", async () => {
   const directory = await mkdtemp(join(tmpdir(), "dcl-events-"));
   const log = new EventLog(join(directory, "rooms.json"));
   const first = await log.append("r1", { type: "a", actor: { kind: "system", id: "system" }, payload: {} });
-  // Replace the anchor file with a directory: the line is still writable, so
-  // the append fails only after its line has landed.
+  // A changed anchor invalidates the warm cache. Its non-file replacement
+  // must refuse the append before either data or intent is published.
   await rm(join(directory, "events", "r1.jsonl.head"));
   await mkdir(join(directory, "events", "r1.jsonl.head"));
   assert.equal(await log.append("r1", { type: "b", actor: { kind: "system", id: "system" }, payload: {} }), null);
   await rm(join(directory, "events", "r1.jsonl.head"), { recursive: true });
   const third = await log.append("r1", { type: "c", actor: { kind: "system", id: "system" }, payload: {} });
-  assert.equal(third.prev === first.hash, false, "the third line chains onto the line that is really on disk");
+  assert.equal(third.prev, first.hash, "the refused append did not change the durable predecessor");
   const lines = (await readFile(join(directory, "events", "r1.jsonl"), "utf8")).split("\n").filter(Boolean).map((line) => JSON.parse(line));
-  assert.deepEqual(lines.map((event) => event.type), ["a", "b", "c"]);
+  assert.deepEqual(lines.map((event) => event.type), ["a", "c"]);
   assert.deepEqual(verifyChain(lines), { ok: true, brokenAt: null });
 });
 
