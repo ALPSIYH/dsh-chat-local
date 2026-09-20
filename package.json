@@ -30,8 +30,13 @@
   },
   "files": [
     "lib/",
+    "scripts/verify-event-log.mjs",
+    "scripts/relationship-eval.mjs",
+    "docs/agent-memory-architecture.md",
     "cordis.patch.yml",
     "README.md",
+    "CONTEXT.md",
+    "CHANGELOG.md",
     "LICENSE"
   ],
   "scripts": {

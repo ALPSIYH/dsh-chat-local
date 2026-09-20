@@ -142,6 +142,8 @@ A 层 appraisal 是**本人对另一成员的表态**。`chat_appraise` 需要�
 
 `EventLog.read` 与同一实例的追加、替换按房间排队，读取日志与锚点期间不会被该实例的写入穿插。`readRoomMemory` 和快照导出等到状态与审计完成，再读取稳定提交版本，避免把未落盘的房间对象与旧日志配对。**这些保证限于一个服务实例**：不提供跨进程锁，也不保证 `rooms.json`、日志与锚点在崩溃时共同原子提交。
 
+故障注入已复现：进程在状态文件替换成功、消息事件追加之前退出，重启后可有消息而无对应事件。`audit` 健康计数仅覆盖当前进程，重启后的零计数不证明历史完整；哈希链校验也无法发现一条从未写入的事件。
+
 - 校验：`node scripts/verify-event-log.mjs <roomId> [--state <rooms.json>]`，只读校验磁盘链与锚点，失败以非零码退出。对在线状态目录跨进程读取没有快照锁，复核时宜使用停写后的副本。
 - 导出：`GET /api/dsh-chat-local/rooms/:id/snapshot?configHash=…`，包含已提交房间、事件与内容哈希；这是房间 run 快照，不含其他房间、人格文件或原生 Session 历史。
 - 恢复：`POST /api/dsh-chat-local/rooms/:id/restore-from-snapshot`，请求 `{"snapshot": …, "confirm": true}`。先校验快照和事件链、备份状态为 `.pre-restore.bak`，再作废旧回合并串行恢复。恢复本来就会丢弃快照之后的房间事件，不能把它当成保留全部新数据的合并。

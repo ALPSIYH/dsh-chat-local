@@ -149,7 +149,12 @@ node --test test/persistence-contract.test.js test/snapshot-restore.test.js
 node --test test/agent-identity-history.test.js test/appraisal.test.js
 node --test test/agent-memory.test.js test/agent-persona.test.js test/personal-memory-integration.test.js
 node --test test/evaluation-contract.test.js test/experiment.test.js
+node --test test/comprehensive-memory.test.js test/comprehensive-persistence.test.js test/comprehensive-replay.test.js
 npm run check
 ```
 
 持久化测试使用临时状态目录及受控 I/O 屏障，覆盖读取/追加/替换顺序、旧 appraisal 跨恢复拒绝、一致快照和保存失败；身份与记忆测试覆盖 Session 复用、私人判断隔离、观察证据和截断；评测测试检验无交互、缺失分母和无效配置。测试成功不构成对生产数据完整性或研究识别条件的认证。
+
+`test/comprehensive-runtime.test.js` 是可选的真实宿主集成测试。设置 `DSH_MODULES_DIR` 为已安装 DSH 的 `node_modules` 后运行；它在临时目录装配实际 Cordis、ToolRuntime 和 SystemPrompt，验证挂载、可选服务进出、可见消息及效果销毁，不唤醒模型或连接正式房间。未提供该环境变量时会明确跳过。
+
+长历史回归覆盖 15 万事件的派生、判断、分段和离散统计，避免将整份历史展开成函数参数触及引擎上限；仍是整份读入和排序，不代表无限规模或固定内存开销。受控进程退出另确认：状态替换成功但审计尚未追加时，重启能留下有消息、无事件的缺口，且当前进程健康计数为零。此跨文件崩溃一致性缺口尚未解决，不能用健康计数或自洽哈希链证明观察历史完整。
