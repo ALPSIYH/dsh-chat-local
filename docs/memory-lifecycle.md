@@ -1,108 +1,133 @@
-# 個人記憶生命週期（0.18.0-local.1）
+# 個人記憶的使用與生命週期
 
-本版將個人記憶的索引、整理、休眠、明確抑制與容量控制接入實際插件。原始事件仍是證據來源；人格 Markdown、原始經歷、目前信念和對他人的 appraisal 分開保存。這些機制不等於已實現完整的人類記憶，也不證明真實模型具有穩定人格。
+Agent 可以回想跨工作中本人實際見過的文字、本人輸出、目前信念及對他人的評價。人格由獨立 Markdown 設定；記憶操作保留來源，不自動改寫人格。本文說明召回、整理、衰減與控制。內部資料流見[架構文件](agent-memory-architecture.md)，部署、儲存配置與健康診斷見[維運指南](operations.md)。
 
-## 觀察、索引與自動整理
+## 查詢本人的記憶
 
-收到可歸屬於本人的文字觀察後，先持久化收據，再排入背景整理；預設合併 50 ms 內的通知，每批最多處理 8 個 Agent。查詢也會處理尚未整理的變更。`AgentMemoryIndex` 接收已驗證的來源版本及追加差量，來源被替換或恢復時重建該來源；暖查詢不再逐次對全部相關事件重新投影。
-
-整理是 **extractive equivalence 去重**：同來源、同種類、完全相同內容雜湊的本人材料，召回時可合成一條代表記憶及重複數。不同人的材料、不同來源及不同內容不能合成同一事實；原始日誌保持不變。這不是語義摘要，不推理出新結論，也不自動改寫人格。代表條目保留來源、證據和觀察收據，完整歷史仍可從原始日誌追查。
-
-個人索引是可重建的進程內快取，不保存為新的權威資料庫。重啟、首次讀取或快取淘汰後，仍要讀取並驗證相關來源。日誌層另有已驗證來源快取；來源簽名、head 或版本改變會使原視圖失效。索引上限與日誌快取上限是兩套資料預算，**不是整個 Node 程序的 RSS 上限**。
-
-召回按文字匹配、相關對象、釘選和觀察時間排序，保留確定性的來源／證據次序。沒有向量搜尋或模型語義重排。預設每次最多檢查 2,000 個候選；達上限、來源不可用或權威資料不完整時明示 `partial`。`totals` 是本次已檢查且符合條件的候選數，不能當作全歷史精確總數。`limit` 同時限制 experiences、judgements、beliefs 的合計條數；完整 JSON 另受 byte 上限約束，`omittedByBudget` 包含各次限額省略，`serializedBytes` 是實際序列化長度。
-
-## 休眠與抑制
-
-預設啟用可逆的召回衰減，半衰期 30 日，活化程度為 `2^(-age/halfLife)`；低於 0.2 的未釘選項目成為 dormant。這是工程預設，未經真實使用或心理學資料校準。時間使用日誌記錄的觀察 `at`；邏輯時間可領先牆鐘，因此不能把它解釋為精確心理時間。
-
-- **active**：可進入預設注入和查詢候選，仍受來源、排序及容量限制。
-- **dormant**：預設注入省略；`chat_recall` 的相關明確查詢可再次取出。
-- **pinned**：抵抗時間衰減並提升優先度，但不繞過權限、來源失效、reset 或輸出預算。
-- **suppressed**：明確查詢也不能取出；須明確 restore 才恢復候選資格。這不刪除原始證據。
-
-再次實際看到材料可更新接觸時間；讀回本插件的摘要或個人查詢結果不構成新觀察。reset、撤回、恢復後的來源版本與抑制規則在查詢、提示注入和 belief 證據核驗時共同生效。某個控制來源不可讀時，不得從另一份快取把已抑制內容復活。
-
-## 本人記憶操作與目前信念
-
-`chat_memory_update` 以執行工具的 Session 解析本人身分，接受 `action` 和唯一 `operationId`。同一操作重試返回既有結果；同鍵不同內容拒絕。可用操作：
-
-| action | 必要資料 | 行為 |
-| --- | --- | --- |
-| `pin` / `unpin` | `sourceRoomId`、`evidenceId` | 調整本人已觀察材料的召回優先度 |
-| `suppress` / `restore` | `sourceRoomId`、`evidenceId` | 停用／恢復該材料的召回資格 |
-| `belief` | `claim`、1–8 個原始觀察 `evidence` | 記錄本人目前的待核查結論 |
-| `belief` 加 `supersedes` | 原 belief id 及新主張／證據 | 追加修訂，舊信念不再是目前信念 |
-| `revoke_belief` | `beliefId` | 追加撤回；保留歷史 |
-
-`evidence` 每项是 `{sourceRoomId,evidenceId}`。主張最多 2,000 UTF-16 碼元；證據必須本人實際見過，不能以另一條信念或主觀 appraisal 代替原始材料。寫入保留內容 hash 與觀察收據；再次讀到同內容不會令原來仍有效的證據失效，真正 reset、替換、抑制或刪去原收據則會使該信念失去有效支持。`belief` 是本人解釋，不是已驗證事實，亦不自動變成對別人的評價、工作指令或授權。
-
-操作只追加 `memory.control`／`memory.belief` 事件，不修改人格或原始文本。活動群聊操作仍綁定當前房間、回合及 reset 範圍；省略房間不能繞過這些限制。
-
-## 容量與冷檔
-
-同一服務的狀態、事件、人格、備份、導出及維護寫入共用 `StorageCapacity`。入場與結算串行；實際 I/O 可並行，但預估峰值和已提交的待發布義務持續佔用額度。容量不足會拒絕新增工作，不以丟棄證據換取成功回覆。既有超額資料可讀；完成已提交義務可動用恢復預留，健康資訊記錄超額債務。
-
-| `storage` 設定 | 預設 |
-| --- | --- |
-| `softBytes` | 1 GiB，回報壓力 |
-| `hardBytes` | 2 GiB，限制新寫入 |
-| `recoveryReserveBytes` | 128 MiB，保留給既有義務完成 |
-| `minFreeBytes` | 16 MiB，普通寫入須保留的磁碟空間 |
-| `agentObservationBytes` | 256 MiB，每 Agent 歸屬事件的邏輯 bytes |
-
-容量計算是檔案邏輯大小，不是磁碟 blocks；每人額度按带 `observerAgentId` 的事件計費，不代表已精確分攤人格、每份共享檔案和所有程序記憶體。跨進程或其他軟體可改變磁碟；沒有跨進程配額鎖。請使用專屬狀態目錄，不要將無關大型檔案放入其下。
-
-本機管理 API `POST /api/dsh-chat-local/storage/maintain` 接受：
+`chat_identity` 讀取本人身分與人格；`chat_recall` 查詢本人有權讀取的記憶，例如：
 
 ```json
-{"sourceRoomId":"實際房間或原生觀察來源 id","action":"archive"}
+{"query":"測試報告 驗收","limit":12}
 ```
 
-`action` 可為 `archive`、`thaw`、`cleanup`。它不註冊為 Agent 工具，沿用本機管理 API 的存取邊界，**不認證本地呼叫者**。
+`query` 最多 2,000 個 UTF-16 碼元；`limit` 為 1–100，預設 24，合計限制 `experiences`、`judgements`、`beliefs` 三類條目。可選 `room` 接受本人參與房間的確切名稱或 ID，用來消除 Session 綁定歧義。活動群聊仍使用當前房間與 reset 範圍，省略房間不會解除限制。
 
-`archive` 對整個來源作無損 gzip，保存壓縮檔、校驗過的 `.jsonl.cold` manifest、原始 bytes/hash、事件數和 head。manifest 持久生效後才清空熱 `.jsonl`，後者保留作來源發現入口。冷讀須先核驗內容；追加前需整份 thaw 回熱日誌。`cleanup` 只在目前來源驗證成功後移除不再被 manifest 引用的生成壓縮副本，不刪目前證據。房間快照、離線驗證和評測使用共同冷檔讀取入口。
+回傳的 `sourceRoomId`、`evidenceId` 和觀察收據標示材料出處。本文的「原始觀察」包含本人曾收到的文字及本人輸出；材料的真實性需另行核驗。
 
-目前是**手動、整份來源壓縮**，不是自動分段輪替、按需分頁或保留期刪除。單次 archive 預設拒絕超過 256 MiB 的來源；冷讀解壓存在 2 GiB 上限。冷讀／thaw 仍須完整解壓和足夠暫存空間；因此不能藉冷檔宣稱固定讀取成本。原始歷史和人格歷史沒有自動物理刪除策略。容量不足時須由管理者調整容量或維護資料，插件不偷偷裁剪它們。
+| 回傳資訊 | 如何解讀 |
+| --- | --- |
+| `status: available` | 本次查詢所需來源可用；條目仍可能受排序與預算限制 |
+| `status: partial`、`unavailableSources` | 有來源、權威資料、快取或候選額度缺口 |
+| `status: disabled` | 配置已停用個人記憶 |
+| `totals` | 本次已檢查且符合條件的候選數，不是全歷史精確總數 |
+| `coverage.omittedByBudget` | 因合計條數或 JSON 大小限制省略的數量 |
+| `coverage.serializedBytes` | 完整回應實際序列化的 UTF-8 bytes |
+| `truncated`、`sourceChars`、`recalledChars` | 文本是否截斷、原始與召回長度 |
 
-## 設定與健康觀察
+每條經歷最多召回 2,000 個 UTF-16 碼元；文件及原生文字收據的保存摘錄最多 20,000 碼元，`chat_memory` 的單項結構化摘要最多 2,000 碼元。完整 JSON 含中繼資料，預設上限 64 KiB。字數與 bytes 是不同限制，含非 ASCII 文字時不可互換。
 
-插件 `memoryLifecycle` 預設：
+## 召回與整理
+
+收到可歸屬於本人的文字後，插件先保存收據，再排入背景整理。通知以 50 ms 合併，每批最多處理 8 位 Agent；查詢也會處理尚未整理的變更。索引依已驗證來源版本增量更新，來源替換、恢復或重啟時重建。
+
+整理採抽取式去重：同一 Agent、同來源、同種類、相同內容雜湊及相同本人／他人歸屬的材料，可用一條代表記憶和重複數呈現。評價另按對象分開。證據 ID、收據和原始日誌保留。不同內容不會被歸納成新結論，目前沒有向量搜尋、模型語義摘要或自動矛盾解析。
+
+生命週期策略版本 2 的排序先使用詞項匹配與既有優先分數，再於同分時選擇直接觀察材料，接著才是本人陳述、belief 和 appraisal，最後以接觸時間及穩定來源／證據 ID 排序。較相關的本人陳述仍可優先。釘選與相關對象各有加分，因此這不是純文字相關度排序。
+
+原生 `assistant/message` 明確標為 `authored`；群聊僅在有穩定 `authorAgentId` 時判斷 `authoredByObserver`，缺少作者身分的舊資料不靠名稱或措辭猜測。此偏好用於避免本人重述擠掉可查證來源，不保證外部材料正確。一般召回與固定來源快照使用同一比較器；當前問題和零匹配的活躍條目仍可能進入候選。
+
+索引是可重建的進程內快取。預設每次最多遍歷 2,000 個候選，來源驗證、reset 與抑制先於回傳；到達候選上限時揭露 `partial`。來源或控制規則失效後，舊快取不能單獨恢復材料的可見性。
+
+## 活躍、休眠、釘選與抑制
+
+預設活化程度為 `2^(-age/halfLife)`，半衰期 30 日；低於 0.2 的未釘選材料進入休眠。年齡以觀察時間 `observedAt` 計算，缺少時使用 `at`。這些是日誌邏輯時間，可能領先牆鐘；30 日與 0.2 是工程預設，未經心理學或真實使用資料校準。
+
+| 狀態或控制 | 召回效果 |
+| --- | --- |
+| `active` | 可進入預設摘要和查詢，仍受排序、來源及輸出預算限制 |
+| `dormant` | 預設摘要省略；相關的明確 `chat_recall` 查詢可重新取出 |
+| `pin` | 抵抗衰減並增加召回分數；仍遵守來源、reset、抑制和輸出預算 |
+| `suppress` | 明確查詢也不返回內容，直到本人執行 `restore`；原始證據保留 |
+
+再次實際看到材料可更新接觸時間，插件自己的摘要和已知個人查詢結果會被排除，避免重複記憶回流。釘選綁定有效觀察；reset 後的新接觸不能沿用已失效的舊釘選。raw 模式下，同文條目的釘選各自計算，不借用同組另一條的優先權。
+
+## 記憶控制與目前信念
+
+`chat_memory_update` 從執行 Session 解析本人身分，接受以下操作。每次提供 1–200 碼元的穩定 `operationId`；在相同身分與寫入來源下重試同一輸入會返回既有結果，同鍵不同內容會拒絕。重試時保留原房間和輸入。
+
+| `action` | 必要資料 | 結果 |
+| --- | --- | --- |
+| `pin`／`unpin` | `sourceRoomId`、`evidenceId` | 調整已觀察材料的釘選 |
+| `suppress`／`restore` | `sourceRoomId`、`evidenceId` | 停用／恢復召回資格 |
+| `belief` | `claim`、`evidence` | 記錄目前的待核查解釋 |
+| `belief` 加 `supersedes` | 原信念 ID，以及新主張與證據 | 追加修訂，返回新的 `beliefId` |
+| `revoke_belief` | `beliefId` | 撤回本人目前信念，保留歷史 |
+
+先從召回結果取得實際 ID，再填入操作。例如，以下佔位 ID 必須替換為本人可見材料：
 
 ```json
 {
-  "consolidation": true,
-  "decay": true,
-  "halfLifeDays": 30,
-  "maxRecallBytes": 65536,
-  "maxIndexBytes": 268435456,
-  "maxAgentIndexBytes": 268435456,
-  "maxCandidateCount": 2000
+  "action": "belief",
+  "operationId": "review-report-001",
+  "claim": "依這份測試報告，目前仍有驗收項目待完成。",
+  "evidence": [{"sourceRoomId":"來源 ID","evidenceId":"證據 ID"}]
 }
 ```
 
-每人索引使用量還受目前參與快取的 Agent 數量分攤全域預算，因此 `maxAgentIndexBytes` 不是最低保留額度。上述為可重建資料的計算額度；淘汰後需重新讀來源。`personalMemory:false` 停用個人召回／注入、原生觀察及記憶更新，不停用人格，也不刪除已存資料。`appraisalDigest:false` 停用自動注入 appraisal，並不撤銷它。
+`claim` 為 1–2,000 個 UTF-16 碼元；`evidence` 需 1–8 項，每項只提供 `sourceRoomId` 與 `evidenceId`。服務核驗本人可見性並補存內容雜湊及觀察收據。可引用本人已觀察材料，不能以另一條信念或 appraisal 替代原始支持。
 
-`GET /api/dsh-chat-local/health` 的 `audit` 包含：
+信念表示本人的解釋。再次讀到同內容且原收據仍有效時，既有支持可繼續成立；reset、來源替換、抑制或原收據消失時重新核驗。修訂與撤回使用明確 ID 關係，避免來源載入順序使舊主張復活。這些操作不改寫原文，不授予工作權限。
 
-- `storage`：已用、預留、待發布義務、恢復債務、每人計費、拒絕／失敗及壓力。
-- `memory.index`：來源、條目、計算用 bytes、候選工作量、淘汰和權威資料缺口。
-- `memory.maintenance`：背景整理次數、失敗與排隊狀態。
-- `memory.coverage`：本進程收到的文字觀察收據／失敗、未綁定或歧義身分、非文字事件和排除的回讀。
+活動群聊的記憶操作受當前房間、回合和 episode 邊界約束。`chat_appraise` 另用於對其他成員的主觀評價，其證據與有效回合要求見[架構文件](agent-memory-architecture.md#評價與信念)。
 
-coverage 是 **this-service-process** 計數，重啟重新計算；不掃描掛載前原生歷史，不提取圖片／音訊內容，也不知道宿主未發給插件的事件。`memory_incomplete` 揭露本進程已知的收據失敗；零失敗或 `ok` 不是所有現實經歷完整的證明。外部模型收到內容與本地收據落盤仍不是同一個原子事務。
+## 配置
 
-## 測試與驗證界限
+在插件配置的 `memoryLifecycle` 下設定；未提供時使用以下值：
 
-```sh
-node --test --test-timeout=45000 test/agent-memory-index.test.js test/memory-index-independent.test.js test/memory-lifecycle-service.test.js
-node --test --test-timeout=45000 test/persona-longitudinal.test.js
+```json
+{
+  "memoryLifecycle": {
+    "consolidation": true,
+    "decay": true,
+    "halfLifeDays": 30,
+    "maxRecallBytes": 65536,
+    "maxIndexBytes": 268435456,
+    "maxAgentIndexBytes": 268435456,
+    "maxCandidateCount": 2000
+  }
+}
 ```
 
-索引反例測試涵蓋跨來源抑制、snapshot override、來源失效、reset、重讀證據、信念修訂、容量淘汰與省略計數。人格工具提供兩人各 12 個持續工作 episode、三個 Session、兩次重啟、0/3/6/12 凍結 checkpoint；probe 只在副本執行，不能流回主軌跡。完整方法見 [縱向人格試驗](persona-longitudinal.md)。32 次真實請求的實測結果由對應 run 檔案另行報告，本文不預先宣稱完成或人格已通過驗證。
+| 參數 | 接受範圍 | 作用 |
+| --- | --- | --- |
+| `consolidation` | 布林值 | 合併同文候選及安排背景整理；關閉時返回各原始條目 |
+| `decay` | 布林值 | 是否套用時間衰減；關閉仍遵守抑制和來源限制 |
+| `halfLifeDays` | 整數 1–36,500 | 時間衰減半衰期 |
+| `maxRecallBytes` | 整數 1,024–65,536 | 完整召回 JSON 的 byte 上限 |
+| `maxIndexBytes` | 整數 4,096–2,147,483,648 | 全域個人索引計算額度 |
+| `maxAgentIndexBytes` | 整數 4,096–2,147,483,648 | 單一 Agent 的索引額度上限 |
+| `maxCandidateCount` | 整數 1–2,000 | 每次召回的候選遍歷額度 |
 
-仍未完成：語義層自動歸納與矛盾解析、非文字知覺記憶、掛載前歷史的授權導入、分段冷檔／大來源分頁、物理刪除與保留期治理、多寫入程序協調，以及足夠獨立軌跡和人工盲評支持的人格穩定性結論。
+整數超出範圍會截到邊界，非安全整數使用預設值；非布林值也使用預設。正規化後的策略版本由程式提供，目前為 2，參與實驗配置指紋，不需手工設定。
 
-## 来源读取健康状态
+每人索引額度還受目前快取中的 Agent 數量分攤全域預算，並無最低保留額度。來源按容量策略淘汰後可重新載入；索引額度與日誌已驗證快取分別計算，都不等於 Node 程序 RSS 上限。首次讀取、重啟或淘汰後的查詢仍需完整讀取相關來源。
 
-`memory.reads.unavailableSourceCount` 是本次程序最近核验仍不可读的来源数量；同一来源重新成功核验才清除。它不是所有历史都已被扫描的保证。即使 `failedReceipts` 为零，已知来源不可读、策略来源不完整、索引发生容量淘汰或背景整理报告错误，也会使 `/health` 显示 `memory_incomplete`；实时用量和正常读取次数不会改变健康 ETag。
+插件頂層 `personalMemory:false` 停用個人召回、注入、原生觀察及記憶更新；人格仍可提供，既有資料和群聊審計收據保留。`appraisalDigest:false` 停用主觀評價的自動注入，保留顯式查詢與原事件。
+
+## 容量與冷檔
+
+狀態、事件、人格歷史、備份、導出和維護寫入共用儲存額度。容量不足時拒絕新增工作，已提交的發布義務使用恢復預留；不自動裁剪原始證據。每 Agent 儲存額度按帶 `observerAgentId` 的事件計費，與上述進程內索引額度不同。
+
+管理者可手動將整份來源無損壓縮為帶校驗 manifest 的冷檔。讀取仍需完整解壓與驗證，追加前先還原熱日誌；預設 archive 來源上限為 256 MiB，解壓上限為 2 GiB。`cleanup` 只移除目前來源驗證成功後、不再被 manifest 引用的壓縮副本。原始歷史與人格舊版沒有自動保留期刪除。
+
+儲存參數、`archive`／`thaw`／`cleanup` 管理入口和健康狀態見[維運指南](operations.md)；寫入預留與冷檔格式細節見[儲存設計](storage-capacity.md)。本機管理 HTTP 不認證本地呼叫者，應連同狀態目錄的存取範圍一起管理。
+
+## 驗證與使用邊界
+
+```sh
+node --test --test-timeout=45000 test/agent-memory-index.test.js test/memory-index-independent.test.js test/memory-retrieval-priority.test.js test/memory-lifecycle-service.test.js
+```
+
+回歸涵蓋跨來源抑制、固定快照、reset、重讀收據、信念修訂、容量淘汰、排序及省略計數。`available`、健康 `ok` 或零收據失敗，只描述本次服務知道的狀態；掛載前歷史、非文字知覺、未送達插件的事件及寫入意圖持久化前的缺口仍可能存在。
+
+目前尚未提供語義自動歸納、矛盾解析、非文字記憶、授權歷史匯入、分段冷檔、大來源分頁、保留期物理刪除或多寫入程序協調。人格 Markdown 的穩定注入也不能直接證明模型行為穩定；相關實驗需保留獨立軌跡與評估依據，見[縱向人格試驗](persona-longitudinal.md)。

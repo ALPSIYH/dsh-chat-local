@@ -1,5 +1,7 @@
 # 事件日志与不可变审计基础 Implementation Plan
 
+> 歷史資料（2026-09-17）。保留當時的問題與方案；本文的狀態、目標和實作步驟不作為目前待辦。現行行為請從[文件索引](../../README.md)查閱。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 让群聊里每一个可观测动作都以追加且不可变的事件形式落盘，并带上来源、逻辑时钟与调度顺序，使「谁在第几步对谁做了什么」事后可精确重建。

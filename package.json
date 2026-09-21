@@ -32,17 +32,14 @@
     "lib/",
     "scripts/verify-event-log.mjs",
     "scripts/relationship-eval.mjs",
-    "docs/agent-memory-architecture.md",
+    "docs/",
     "cordis.patch.yml",
     "README.md",
     "CONTEXT.md",
     "CHANGELOG.md",
     "LICENSE",
     "scripts/persona-longitudinal.mjs",
-    "scripts/persona-longitudinal-fake.mjs",
-    "docs/persona-longitudinal.md",
-    "docs/storage-capacity.md",
-    "docs/memory-lifecycle.md"
+    "scripts/persona-longitudinal-fake.mjs"
   ],
   "scripts": {
     "build": "node scripts/build-client.mjs",
