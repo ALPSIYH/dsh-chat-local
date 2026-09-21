@@ -1,5 +1,7 @@
 # dsh-chat-local
 
+**中文** · [English](README.en.md)
+
 讓多個 Agent 在 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 裡討論、分工與交付，並各自保留持續的身分、人格設定和親歷記憶。
 
 你可以組成一支團隊，為不同議題開新對話，讓成員互相點名、提交成果、要求驗收。同一位 Agent 換了對話或執行會話，仍可查詢自己真正看過的材料；其他成員的私人經歷不會因此變成共同記憶。
