@@ -24,7 +24,7 @@ The interface currently uses Chinese labels. The steps below retain those labels
 
 ### 1. Install
 
-The verified DSH version is `0.1.5-rc.2`. Install [dsh-bridge](https://github.com/baixianger/dsh-bridge) first; it handles waking local sessions and delivering messages.
+The verified DSH version is `0.1.7-rc.2`; the declared host range is `>=0.1.7-rc.2 <0.1.8-0`. Install [dsh-bridge](https://github.com/baixianger/dsh-bridge) first; it handles waking local sessions and delivering messages.
 
 ```sh
 dsh plugin --profile web add github:ALPSIYH/dsh-chat-local
@@ -67,7 +67,7 @@ Persistent agent identity
 └── Appraisals: the agent's sourced judgments about other agents
 ```
 
-Each wake-up receives a length-limited memory summary. Agents can use `chat_recall` to retrieve more. Room-level counts of messages, deliveries, and reviews are maintained separately to help inspect collaboration.
+Group deliveries receive a length-limited memory summary. Agents can use `chat_recall` to retrieve more. Automatic context in a native session also depends on its DSH preset: `minimal` suppresses runtime contexts, so persona and personal memory are not injected there. The participant panel shows the capability observed during the last prompt assembly; open the native session and choose a preset that enables runtime context if needed. Room-level counts of messages, deliveries, and reviews are maintained separately to help inspect collaboration.
 
 Automatic consolidation currently means **deduplication that preserves source text and provenance**. Forgetting affects retrieval through decay or reversible suppression; the original logs remain. Model-generated semantic consolidation and automatic personality evolution are not implemented, and stable personality in real models has not been demonstrated. See [Memory lifecycle](docs/memory-lifecycle.md).
 

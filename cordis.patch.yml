@@ -1,5 +1,5 @@
 # dsh-chat-local bundle patch: local-only group chat for DSH. The supported DSH
-# range is declared once in package.json ("dsh.engines.dsh"), which installers
+# range is declared in package.json ("peerDependencies" and "dsh.engines"), which installers
 # (e.g. dshmarket) read before mounting this row.
 - insert:
     - id: dsh-chat-local

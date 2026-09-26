@@ -4,7 +4,7 @@
 
 ## 安裝與首次啟動
 
-1. 準備 DeepSeek Harness 與 [`dsh-bridge`](https://github.com/baixianger/dsh-bridge)。`package.json` 宣告的 DSH 範圍是 `>=0.1.5-rc.2`，插件使用該系列的槽位與 Session 介面；升級宿主仍需檢查相容性。使用與 DSH 相同的 Node 執行版本。
+1. 準備 DeepSeek Harness 與 [`dsh-bridge`](https://github.com/baixianger/dsh-bridge)。`package.json` 宣告的 DSH 範圍是 `>=0.1.7-rc.2 <0.1.8-0`（已實測 `0.1.7-rc.2`），同時寫入原生載入器使用的 `peerDependencies` 與第三方安裝器使用的 `dsh.engines`；其他宿主系列須重新驗證。peer 設為 optional，避免 npm 額外安裝一份 DSH。使用與 DSH 相同的 Node 執行版本。
 2. 安裝到實際使用的 profile。以下使用 `web`；GitHub 與本地 link 二擇一。
 
    ```sh
@@ -56,6 +56,14 @@ curl --fail --silent --show-error "$DCL_BASE/health"
 另外查看 `audit.failed`、`droppedCount`／`dropped`、`lastError`、`journal`、`memory.coverage`、`memory.reads` 和 `storage`。GET 不會掃遍所有事件；容量數字以 `checkedAt` 為準，觀察 coverage 是本程序計數，不涵蓋宿主未傳送或插件掛載前的內容。重啟使部分計數重置，不等於補回資料。
 
 健康端點使用穩定 ETag，正常用量／成功次數改變不一定更換 ETag。需要新的數值時不要附帶舊 `If-None-Match`；304 只適合判斷所選健康狀態是否變化。
+
+## 原生會話的上下文與工具模式
+
+參與者與 `chat_identity` 的 `nativeContext` 描述本程序最近一次提示組裝所見的能力：`available` 是宿主允許注入，`suppressed` 是預設停用，`unavailable` 是服務不可用，`not_observed` 是尚未觀察。這些值不證明模型採用了人格或記憶；修改預設後，需等下一次組裝才更新。健康資訊的 `audit.memory.nativeContext` 保留有界的能力計數，重啟會清空。
+
+`minimal` 的 `includeRuntimeContext: false` 會停用原生人格／記憶自動注入。插件尊重此設定，群聊投遞中的摘要與 `chat_identity`／`chat_recall` 仍可使用。需要原生自動延續時，在參與者面板開啟會話並明確選擇支援執行期上下文的預設。
+
+PTC 模式原本會將工具收合成 `run_code`，與群聊唯讀守衛衝突。受限群聊被宿主領取時，插件只在該回合暫用原生工具介面，結束或取消後釋放；`run_code` 仍不放行。原生 Team 的 `list_agents`、`team_task_list`、`team_task_get`、`wait_agent` 是該會話子團隊的工具，不是群聊成員與台帳的替代品。建立子成員不會自動授予群聊身分或繼承私人記憶。
 
 ## 升級：先停寫，再備份與預檢
 

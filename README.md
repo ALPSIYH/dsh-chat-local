@@ -22,7 +22,7 @@
 
 ### 1. 安裝
 
-已驗證的 DSH 版本是 `0.1.5-rc.2`。需要先安裝 [dsh-bridge](https://github.com/baixianger/dsh-bridge)，由它負責本機會話喚醒與投遞。
+已驗證的 DSH 版本是 `0.1.7-rc.2`，載入範圍限定為 `>=0.1.7-rc.2 <0.1.8-0`。需要先安裝 [dsh-bridge](https://github.com/baixianger/dsh-bridge)，由它負責本機會話喚醒與投遞。
 
 ```sh
 dsh plugin --profile web add github:ALPSIYH/dsh-chat-local
@@ -65,7 +65,7 @@ dsh plugin --profile web add github:ALPSIYH/dsh-chat-local
 └── 評價：本人對其他 Agent 的有來源判斷
 ```
 
-記憶在每次喚醒時提供有長度上限的摘要，Agent 也能用 `chat_recall` 查詢更多。房間中的發言、投遞和驗收計數另外保存，供回顧協作過程使用。
+群聊投遞提供有長度上限的記憶摘要，Agent 也能用 `chat_recall` 查詢更多。原生會話的自動注入另受 DSH 預設控制：`minimal` 會停用執行期上下文，因此不自動帶入人格與個人記憶。參與者面板會顯示最近一次提示組裝所觀察到的狀態；要啟用，請開啟原生會話並選擇支援執行期上下文的預設。房間中的發言、投遞和驗收計數另外保存，供回顧協作過程使用。
 
 目前的自動整理是**保留原文與來源的去重**；「遺忘」是可逆的召回衰減或抑制，原始日誌仍保留。尚未提供模型語義歸納、自動人格演化，也未證明真實模型能長期維持穩定人格。詳見[記憶生命週期](docs/memory-lifecycle.md)。
 

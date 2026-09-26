@@ -55,6 +55,63 @@ test("UI send never overwrites a new draft or a different room after an async fa
   h.context.draft="另一条消息";const switched=h.run();h.context.selectedIdRef.current="another-room";h.context.setDraft("另一个房间的草稿");reject(new Error("连接中断"));await switched;
   assert.equal(h.context.draft,"另一个房间的草稿");assert.equal(h.context.messages.length,0);
 });
+
+async function sessionNavigationHarness(ctx, prepareParticipant = async () => {}) {
+  const source = await readFile(new URL("../lib/client.js", import.meta.url), "utf8");
+  const handler = source.slice(source.indexOf("        const openSession = async (participant) => {"), source.indexOf("        const toggleMention ="));
+  const errors = []; let closed = false;
+  const open = vm.runInNewContext(`${handler}\nopenSession`, {
+    ctx, prepareParticipant, setError: error => errors.push(error), props: { onClose() { closed = true; } },
+  });
+  return { open, errors, get closed() { return closed; } };
+}
+
+test("opening a member uses native workspace navigation after preparing its session", async () => {
+  const calls = [];
+  const workspace = { async openSession(id) { assert.equal(this, workspace); calls.push(["open", id]); } };
+  const h = await sessionNavigationHarness({ sessions: {}, uiWorkspace: workspace }, async member => calls.push(["prepare", member.sessionId]));
+  await h.open({ sessionId: "member", nativeSetup: { state: "pending" } });
+  assert.deepEqual(calls, [["prepare", "member"], ["open", "member"]]);
+  assert.deepEqual(h.errors, []); assert.equal(h.closed, true);
+});
+
+test("member navigation keeps the group open if preparation or navigation fails", async () => {
+  for (const failure of ["prepare", "open"]) {
+    const calls = [];
+    const h = await sessionNavigationHarness({ uiWorkspace: { openSession() { calls.push("open"); throw new Error("open failed"); } } },
+      async () => { if (failure === "prepare") throw new Error("prepare failed"); });
+    await h.open({ sessionId: "member", nativeSetup: { state: "pending" } });
+    assert.deepEqual(h.errors, [`${failure} failed`]); assert.equal(h.closed, false);
+    assert.equal(calls.length, failure === "prepare" ? 0 : 1);
+  }
+});
+test("member navigation reports missing Host capability without preparing or closing", async () => {
+  let prepared = false;
+  const h = await sessionNavigationHarness({}, async () => { prepared = true; });
+  await h.open({ sessionId: "member", nativeSetup: { state: "pending" } });
+  assert.equal(prepared, false); assert.equal(h.closed, false);
+  assert.match(h.errors[0], /DSH 會話導航尚未可用/);
+});
+
+test("native context notice exposes suppression and opens the session only on user action", async () => {
+  const source = await readFile(new URL("../lib/client.js", import.meta.url), "utf8");
+  const component = source.slice(source.indexOf("      function NativeContextNotice("), source.indexOf("      function ParticipantModel("));
+  const h = (type, props, ...children) => ({ type, props, children });
+  let opens = 0;
+  const render = vm.runInNewContext(`${component}\nNativeContextNotice`, { h });
+  assert.equal(render({ status: { state: "available" } }), null);
+  for (const state of ["suppressed", "unavailable", "not_observed"]) {
+    const notice = render({ status: { state, message: `${state} detail` }, onOpen: () => { opens++; } });
+    assert.equal(notice.props["data-native-context"], state);
+    assert.equal(notice.children[0].children[0], `${state} detail`);
+    if (state === "suppressed") {
+      assert.equal(opens, 0);
+      notice.children[1].props.onClick();
+      assert.equal(opens, 1);
+    } else assert.equal(notice.children[1], null);
+  }
+});
+
 test("mention routing ignores code, email and longer English names while preserving exact Chinese @ mentions",()=>{
   const members=[{alias:"Alex",sessionId:"a"},{alias:"Alexandra",sessionId:"b"},{alias:"协调",sessionId:"c"},{alias:"协调组",sessionId:"d"}];
   assert.deepEqual(textProtocol.mentions("@allison foo@Alex.com `@全部`\n```\n@Alex\n```",members),[]);

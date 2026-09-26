@@ -98,7 +98,7 @@ test("the package manifest declares the DeepSeek Harness range it is built again
 
 test("the README states the same DeepSeek Harness version the manifest declares", () => {
   const range = manifest.dsh.engines.dsh;
-  const declared = range.replace(/^[\s>^~=v]+/, "").trim();
+  const declared = range.replace(/^[\s>^~=v]+/, "").trim().split(/\s+/)[0];
   assert.ok(
     readme.includes(`\`${declared}\``),
     `README must name the declared DSH version \`${declared}\` so the prose and the machine-readable range agree`

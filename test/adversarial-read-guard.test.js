@@ -6,7 +6,7 @@ import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { DshChatLocalService } from '../lib/room-store.js';
 import {createServer} from 'node:http';
-import {isLocalRequestTarget} from '../lib/restricted-read.js';
+import {isLocalRequestTarget,referencesPrivateState} from '../lib/restricted-read.js';
 
 async function fixture(t) {
   const directory=await mkdtemp(join(tmpdir(),'dcl-adversarial-read-'));
@@ -89,23 +89,44 @@ async function nativeAliases(t) {
 }
 
 for(const input of ['via/../rooms.json','http://../rooms.json','file:///../rooms.json','~/../rooms.json']){
-  test(`native literal path ${input} cannot bypass private-state isolation`,async t=>{
+  test(`legacy lexical literal path ${input} cannot bypass private-state isolation`,async t=>{
     const h=await nativeAliases(t),cwd=input.startsWith('via')?h.workspace:h.stateDirectory;
-    // Installed dsh-fs-local resolves literal paths lexically before realpath.
-    // Read the actual fixture target, so this oracle verifies content reached.
+    // Older hosts resolve lexically. Keep this privacy protection while also
+    // testing current native physical traversal separately below.
     assert.match(await readFile(resolve(cwd,input),'utf8'),/another private room/);
     assert.match(h.execute('read',{file_path:input},cwd)??'',/受限模式/);
   });
 }
 
-test('a lexical public target stays readable when resolving a symlink before dot-dot would reach private state',async t=>{
+test('a lexical public decoy cannot hide a physical private target',{
+  skip:process.platform==='win32'&&'POSIX physical parent traversal fixture',
+},async t=>{
   const h=await fixture(t);
   await mkdir(join(h.stateDirectory,'sub'));
   await symlink(join(h.stateDirectory,'sub'),join(h.workspace,'via'));
   await writeFile(join(h.workspace,'rooms.json'),'public fixture');
   const file_path='via/../rooms.json';
   assert.equal(await readFile(resolve(h.workspace,file_path),'utf8'),'public fixture');
-  assert.equal(h.execute('read',{file_path}),undefined);
+  assert.match(await readFile(h.workspace+'/'+file_path,'utf8'),/another private room/);
+  assert.match(h.execute('read',{file_path})??'',/受限模式/);
+});
+
+test('private-state protection follows aliased working directories and absent descendants',{
+  skip:process.platform==='win32'&&'POSIX physical parent traversal fixture',
+},async t=>{
+  const h=await fixture(t);
+  await mkdir(join(h.stateDirectory,'sub'));
+  await symlink(join(h.stateDirectory,'sub'),join(h.workspace,'via'));
+  await symlink(h.stateDirectory,join(h.workspace,'store-alias'));
+  for(const [file_path,cwd] of [
+    ['../rooms.json',join(h.workspace,'via')],
+    ['rooms.json',h.workspace+'/via/..'],
+    ['via/../not-created/rooms.json',h.workspace],
+    ['store-alias/not-created/rooms.json',h.workspace],
+  ]) assert.match(h.execute('read',{file_path},cwd)??'',/受限模式/,`${file_path} from ${cwd}`);
+  assert.equal(h.execute('read',{file_path:'not-created/public.json'}),undefined);
+  assert.equal(referencesPrivateState({file_path:h.path},{statePath:h.workspace+'/via/../rooms.json',cwd:h.workspace}),true,
+    'the configured private root also preserves physical parent traversal');
 });
 
 test('URL-capable fetch still refuses private file URLs',async t=>{
@@ -115,15 +136,20 @@ test('URL-capable fetch still refuses private file URLs',async t=>{
 });
 
 const hostModules=process.env.DSH_MODULES_DIR;
-test('installed native filesystem resolver reaches the exact protected alias fixtures',{
+test('installed native filesystem resolver and guard protect both physical and legacy aliases',{
   skip:!hostModules&&'set DSH_MODULES_DIR to run the installed native resolver',
 },async t=>{
   const {LocalFileSystem}=await import(pathToFileURL(join(hostModules,'@deepseek-ai/dsh-fs-local/lib/index.js')));
   const h=await nativeAliases(t);
   for(const input of ['via/../rooms.json','http://../rooms.json','file:///../rooms.json','~/../rooms.json']){
     const cwd=input.startsWith('via')?h.workspace:h.stateDirectory;
-    const target=await LocalFileSystem.prototype.resolve.call({config:{cwd}},input,{cwd});
-    assert.match(await readFile(target.targetKey,'utf8'),/another private room/);
+    // Current POSIX hosts reach the public decoy or reject a missing literal
+    // prefix; old hosts reach private state. Either way the guard must retain
+    // its conservative protection for readers using the older interpretation.
+    try {
+      const target=await LocalFileSystem.prototype.resolve.call({config:{cwd}},input,{cwd});
+      assert.match(await readFile(target.targetKey,'utf8'),/another private room|public decoy/);
+    } catch(error) { assert.equal(error.code,'FS_NOT_FOUND'); }
     assert.match(h.execute('read',{file_path:input},cwd)??'',/受限模式/);
   }
 });

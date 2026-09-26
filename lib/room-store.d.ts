@@ -1,5 +1,11 @@
 import type { DshChatLocalConfig } from "./index.js";
 
+export interface NativeContextStatus {
+  state: "available" | "suppressed" | "unavailable" | "not_observed";
+  message: string;
+  observedAt?: number;
+}
+
 export interface AuditHealth {
   appended: number; failed: number; lastError: string | null; droppedCount: number; dropped: any[];
   pendingRecovery: number; pendingRooms: string[]; recoveredOperations: number;
@@ -14,6 +20,8 @@ export interface AuditHealth {
     checkedAt: number | null; active: boolean; ownership: "single-service-instance"; accounting: "logical-file-bytes";
   };
   memory: {
+    nativeContext: { scope: "last-observed-host-assembly-this-process"; serviceAvailable: boolean;
+      trackedSessions: number; trackingLimit: number; available: number; suppressed: number };
     reads: { unavailableSourceCount: number; scope: "last-verified-source-state-this-process" };
     coverage: { history: "live-events-only"; modalities: string[]; measuredSince: number;
       countersScope: "this-service-process"; preMountHistoryImported: false; limitations: string[];
@@ -102,6 +110,10 @@ export declare class DshChatLocalService {
   agentIdentity(sessionId: string, roomId?: string): Promise<any>;
   /** Optional native system-prompt context, absent for unbound or group-turn sessions. */
   nativeAgentContext(sessionId: string): Promise<string | null>;
+  /** Capability observed at the latest native prompt assembly, not model adoption. */
+  nativeContextStatus(sessionId: string): NativeContextStatus;
+  /** Exact Host inbox claim before prompt assembly; scopes restricted group tools. */
+  observeNativeInputClaim(input: { agent: any; message: any; turn: number }): void;
   /** Read only personally observed sources bound to this identity. */
   agentMemory(sessionId: string, input?: { roomId?: string; query?: string; limit?: number; mode?: "default" | "explicit" }): Promise<any>;
   /** Own lifecycle edits require current personally observed evidence and an idempotency key. */

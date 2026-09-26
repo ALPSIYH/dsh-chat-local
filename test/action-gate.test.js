@@ -108,14 +108,16 @@ const GATE_OFF_OUTCOMES = [
  * Exact post-refactor gate-off baseline. Personal memory adds one receipt before
  * the delivered transition finishes. The memory lifecycle adds 47 characters
  * to the identity/recall paragraph to describe current beliefs and chat_memory_update.
- * Reverting only that paragraph reproduces both preceding baseline hashes.
+ * Host compatibility adds 183 characters separating native Agent Teams from
+ * this room's coworkers, routing and ledger; the gate-off fixture records that
+ * intentional prompt change without filtering it out.
  * UUID normalization is the only transformation used in the actual assertions;
  * neither extra event types nor unexpected prompt changes are filtered out.
  */
 const MEMORY_GATE_OFF_EVENT_TYPES = ["member.added", "message.created", "message.created", "turn.scheduled", "relationship.snapshot", "turn.prompt", "injection.cost", "delivery.settled", "message.created", "turn.scheduled", "relationship.snapshot", "turn.prompt", "injection.cost", "delivery.sent", "memory.observed", "delivery.settled"];
 const MEMORY_GATE_OFF_PROMPTS = [
-  { chars: 2881, sha256: "ab52be505e8dc9347cde523608bfd77df37c3b1c46155ddf5d433b69f7968c3e" },
-  { chars: 2937, sha256: "dd947c64f9549549d64b9d33962a39b99637433637bf22f3a8d6ed0d846d8d5d" },
+  { chars: 3064, sha256: "d356a26c0b93fb90e5e189a290bb308a8a5e2904080a71f7ef909f6cf68dd1b0" },
+  { chars: 3120, sha256: "6260352d1f0f4073164824f7ec1cedbdebad1cd1289187c1734489dd18de0448" },
 ];
 const UUID = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g;
 

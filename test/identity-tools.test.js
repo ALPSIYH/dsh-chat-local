@@ -112,7 +112,8 @@ test("native prompt context is optional and its event registration is disposed",
 });
 
 test("native context awaits other providers and passes personality Markdown as a literal variable", async (t) => {
-  const h = await mounted(t, {}, { systemPrompt: {} });
+  let sentinel;
+  const h = await mounted(t, {}, { systemPrompt: { context(value) { sentinel = value; return () => {}; } } });
   const identity = await h.execute("chat_identity", "s1");
   const markdown = "# Personality\nKeep literal {{secret}} and {{unknown_variable}} syntax.";
   const saved = await h.request(`/agents/${encodeURIComponent(identity.agentId)}/persona`, {
@@ -121,15 +122,15 @@ test("native context awaits other providers and passes personality Markdown as a
   assert.equal(saved.code, 200);
   const hook = h.hooks.get("system-prompt/assemble");
   const priorContext = { name: "host", text: "Existing context" };
-  const assembly = { contexts: [], variables: {} };
-  const result = { contexts: [priorContext], variables: { secret: "must not expand", host_value: "kept" } };
+  const assembly = { contexts: [{ ...sentinel }], variables: {} };
+  const result = { contexts: [priorContext, { ...sentinel }], variables: { secret: "must not expand", host_value: "kept" } };
   let nextCalls = 0;
   const returned = await hook(assembly, { agent: { session: { id: "s1" } } }, async () => {
     nextCalls++; await Promise.resolve(); return result;
   });
   assert.equal(nextCalls, 1);
   assert.equal(returned, result);
-  assert.deepEqual(assembly, { contexts: [], variables: {} }, "uses the completed provider result");
+  assert.deepEqual(assembly, { contexts: [{ ...sentinel }], variables: {} }, "uses the completed provider result");
   assert.equal(result.contexts[0], priorContext);
   assert.equal(result.variables.host_value, "kept");
   assert.deepEqual(result.contexts[1], { name: "dsh-chat-local:person", text: "{{dsh_chat_person_context}}" });

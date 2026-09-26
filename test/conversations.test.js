@@ -19,12 +19,22 @@ async function fixture(run,{replyTimeoutMs=500}={}){
     dshBridge:{async status(){return {state:"idle"};},async deliverExternal(from,to,text,delivery){calls.push({from,to,text,delivery});}}
   };
   const service=new DshChatLocalService(ctx,{path,replyTimeoutMs,maxReplies:1});
-  try{await run({service,ctx,path,dir,calls,configs,model,agents,get nativeWrites(){return nativeWrites;},get disposed(){return disposed;}});}
+  const waitForCalls=expected=>until(()=>calls.length===expected,{
+    label:`bridge delivery count ${expected}`,
+    inspect:()=>({calls:calls.length,nativeWrites,preparing:service.sessionPreparations.size,pending:[...service.pending.values()].map(item=>({status:item.delivery.status,replyTimerStarted:item.timer!==undefined}))})
+  });
+  try{await run({service,ctx,path,dir,calls,configs,model,agents,waitForCalls,get nativeWrites(){return nativeWrites;},get disposed(){return disposed;}});}
   finally{await service.close();await rm(dir,{recursive:true,force:true});}
 }
 const seed=service=>service.createRoom({name:"团队",autoDeliver:true,members:[{kind:"session",sessionId:"old-a",alias:"秘书",role:"协调"},{kind:"session",sessionId:"old-b",alias:"审查",mandate:"独立核验"}],profile:{purpose:"旧任务",charter:"证据可定位"}});
 const send=(service,id,text,extra={})=>service.send({roomId:id,author:"human:me",authorKind:"human",text,automaticDelivery:false,...extra});
-async function until(predicate){for(let n=0;n<100;n++){if(await predicate())return;await new Promise(resolve=>setTimeout(resolve,10));}throw new Error("condition timed out");}
+// Native preparation includes durable writes. Bound elapsed time, not the number
+// of polls, and retain state when a condition fails under the full suite's load.
+async function until(predicate,{label="condition",inspect,timeoutMs=10_000}={}){
+  const started=performance.now();
+  while(performance.now()-started<timeoutMs){if(await predicate())return;await new Promise(resolve=>setTimeout(resolve,10));}
+  throw new Error(`${label} timed out after ${Math.round(performance.now()-started)}ms${inspect?`: ${JSON.stringify(await inspect())}`:""}`);
+}
 
 test("v11 migration keeps legacy messages, work and Session bindings intact",()=>fixture(async h=>{
   const room=await seed(h.service);await send(h.service,room.id,"旧材料 /outside/paper.docx");await h.service.createLedgerEntry(room.id,{kind:"task",title:"旧任务"});
@@ -90,8 +100,8 @@ test("native preparation is lazy and coalesced, persists configuration without m
 
 test("send prepares only its target, excludes old context and does not stop another conversation",()=>fixture(async h=>{
   const old=await seed(h.service);await send(h.service,old.id,"OLD_SECRET_TASK_123");const fresh=await h.service.createConversation(old.id,{operationId:"send"});
-  await send(h.service,old.id,"旧组仍在处理",{automaticDelivery:true,mentions:["session:old-b"]});await until(()=>h.calls.length===1);
-  await send(h.service,fresh.id,"NEW_TOPIC_ONLY",{automaticDelivery:true,mentions:[`session:${encodeURIComponent(fresh.members[0].sessionId)}`]});await until(()=>h.calls.length===2);
+  await send(h.service,old.id,"旧组仍在处理",{automaticDelivery:true,mentions:["session:old-b"]});await h.waitForCalls(1);
+  await send(h.service,fresh.id,"NEW_TOPIC_ONLY",{automaticDelivery:true,mentions:[`session:${encodeURIComponent(fresh.members[0].sessionId)}`]});await h.waitForCalls(2);
   assert.equal(h.calls[1].to,fresh.members[0].sessionId);assert.ok(!h.calls[1].text.includes("OLD_SECRET_TASK_123"));assert.ok(h.calls[1].text.includes("NEW_TOPIC_ONLY"));assert.equal((await h.service.resolveRoom(old.id)).orchestration.state,"running");assert.equal((await h.service.listParticipants(fresh.id))[1].nativeSetup.state,"pending");
 },{replyTimeoutMs:60_000}));
 
@@ -133,9 +143,10 @@ test("local model selection updates only its member, leaves frozen defaults unch
   h.ctx.agentDefaultModel={saveSelection(){assert.fail("must not change global default");}};
   const selected=await h.service.selectMemberModel(fresh.id,fresh.members[0].sessionId,{provider:"local",model:"new"});assert.equal(selected.selected.model,"new");assert.equal(h.configs.get("old-a").model.model,"research");
   const another=await h.service.createConversation(old.id,{operationId:"models-other"});assert.equal(another.members[0].nativeSetup.config.model.model,"research");
-  await send(h.service,fresh.id,"进行中",{automaticDelivery:true,mentions:[`session:${encodeURIComponent(fresh.members[0].sessionId)}`]});await until(()=>h.calls.length===1);
+  await send(h.service,fresh.id,"进行中",{automaticDelivery:true,mentions:[`session:${encodeURIComponent(fresh.members[0].sessionId)}`]});await h.waitForCalls(1);
   await assert.rejects(h.service.selectMemberModel(fresh.id,fresh.members[0].sessionId,{provider:"local",model:"another"}),/stop/);
-}));
+// This test needs an active conversation, not the reply deadline to expire.
+},{replyTimeoutMs:60_000}));
 
 test("stopping while native preparation is pending never delivers or rewrites superseded status as failure",()=>fixture(async h=>{
   const old=await seed(h.service),fresh=await h.service.createConversation(old.id,{operationId:"stop"});
