@@ -1,0 +1,366 @@
+{
+  "schemaVersion": 1,
+  "evidenceKind": "sanitized-derived-summary",
+  "date": "2026-09-28",
+  "caseId": "paper-missing-data",
+  "createdAt": "2026-09-28T13:30:50.364Z",
+  "conclusive": false,
+  "validationLevel": "One real-provider synthetic-case pilot through isolated actual RoomStore and a prescribed protocol driver. Not autonomous tool selection.",
+  "policyAtRun": {
+    "totalDispatchBudgetPerArm": 6,
+    "initialPhaseMaximumDispatches": 3,
+    "inputByteLimit": 50000,
+    "replyCharacterLimit": null,
+    "contextPolicy": "original full bridge prompt plus full chat_memory; before projection fix"
+  },
+  "requestedModel": "deepseek-flash",
+  "requestedParameters": {
+    "maxTokens": 2048
+  },
+  "arms": [
+    {
+      "arm": "single",
+      "trials": 1,
+      "sampleVariance": null,
+      "metrics": {
+        "correct": 1,
+        "omitted": 0,
+        "wrong": 0,
+        "unresolvedObjections": 0,
+        "duplicateReplies": 0,
+        "dispatches": 2,
+        "adapterCalls": 2,
+        "deniedDispatches": 0,
+        "failures": 0,
+        "elapsedMs": 22295,
+        "fixedDelivery": 1,
+        "accepted": 0,
+        "roomAccepted": 0,
+        "protocolPending": 0,
+        "unreviewed": 0
+      },
+      "finalAnswer": {
+        "sampleSize": 12,
+        "rawDataAvailable": false,
+        "numericScore": null,
+        "verdict": "insufficient_evidence"
+      },
+      "score": {
+        "correct": true,
+        "omitted": [],
+        "wrong": [],
+        "expected": {
+          "sampleSize": 12,
+          "rawDataAvailable": false,
+          "numericScore": null,
+          "verdict": "insufficient_evidence"
+        }
+      },
+      "failures": [],
+      "providerCalls": 2,
+      "providerReportedTotalTokens": 12408,
+      "recordedProviderConfigurations": [
+        {
+          "dispatchIndex": 0,
+          "provider": "deepseek-official",
+          "model": "deepseek-flash",
+          "parameters": {
+            "maxTokens": 2048,
+            "reasoningEffort": "high"
+          },
+          "finishReason": "stop",
+          "complete": true
+        },
+        {
+          "dispatchIndex": 1,
+          "provider": "deepseek-official",
+          "model": "deepseek-flash",
+          "parameters": {
+            "maxTokens": 2048,
+            "reasoningEffort": "high"
+          },
+          "finishReason": "stop",
+          "complete": true
+        }
+      ]
+    },
+    {
+      "arm": "legacy",
+      "trials": 1,
+      "sampleVariance": null,
+      "metrics": {
+        "correct": 0,
+        "omitted": 4,
+        "wrong": 0,
+        "unresolvedObjections": 1,
+        "duplicateReplies": 0,
+        "dispatches": 6,
+        "adapterCalls": 6,
+        "deniedDispatches": 0,
+        "failures": 2,
+        "elapsedMs": 81077,
+        "fixedDelivery": 0,
+        "accepted": 0,
+        "roomAccepted": 0,
+        "protocolPending": 0,
+        "unreviewed": 0
+      },
+      "finalAnswer": null,
+      "score": {
+        "correct": false,
+        "omitted": [
+          "sampleSize",
+          "rawDataAvailable",
+          "numericScore",
+          "verdict"
+        ],
+        "wrong": [],
+        "expected": {
+          "sampleSize": 12,
+          "rawDataAvailable": false,
+          "numericScore": null,
+          "verdict": "insufficient_evidence"
+        }
+      },
+      "failures": [
+        {
+          "trialId": "paper-missing-data/0/legacy",
+          "index": 1,
+          "phase": 0,
+          "sessionId": "reviewer",
+          "error": "max-tokens"
+        },
+        {
+          "trialId": "paper-missing-data/0/legacy",
+          "index": 4,
+          "phase": 1,
+          "sessionId": "coordinator",
+          "error": "max-tokens"
+        }
+      ],
+      "providerCalls": 6,
+      "providerReportedTotalTokens": 51062,
+      "recordedProviderConfigurations": [
+        {
+          "dispatchIndex": 0,
+          "provider": "deepseek-official",
+          "model": "deepseek-flash",
+          "parameters": {
+            "maxTokens": 2048,
+            "reasoningEffort": "high"
+          },
+          "finishReason": "stop",
+          "complete": true
+        },
+        {
+          "dispatchIndex": 1,
+          "provider": "deepseek-official",
+          "model": "deepseek-flash",
+          "parameters": {
+            "maxTokens": 2048,
+            "reasoningEffort": "high"
+          },
+          "finishReason": "max-tokens",
+          "complete": false
+        },
+        {
+          "dispatchIndex": 2,
+          "provider": "deepseek-official",
+          "model": "deepseek-flash",
+          "parameters": {
+            "maxTokens": 2048,
+            "reasoningEffort": "high"
+          },
+          "finishReason": "stop",
+          "complete": true
+        },
+        {
+          "dispatchIndex": 3,
+          "provider": "deepseek-official",
+          "model": "deepseek-flash",
+          "parameters": {
+            "maxTokens": 2048,
+            "reasoningEffort": "high"
+          },
+          "finishReason": "stop",
+          "complete": true
+        },
+        {
+          "dispatchIndex": 4,
+          "provider": "deepseek-official",
+          "model": "deepseek-flash",
+          "parameters": {
+            "maxTokens": 2048,
+            "reasoningEffort": "high"
+          },
+          "finishReason": "max-tokens",
+          "complete": false
+        },
+        {
+          "dispatchIndex": 5,
+          "provider": "deepseek-official",
+          "model": "deepseek-flash",
+          "parameters": {
+            "maxTokens": 2048,
+            "reasoningEffort": "high"
+          },
+          "finishReason": "stop",
+          "complete": true
+        }
+      ]
+    },
+    {
+      "arm": "work",
+      "trials": 1,
+      "sampleVariance": null,
+      "metrics": {
+        "correct": 1,
+        "omitted": 0,
+        "wrong": 0,
+        "unresolvedObjections": 0,
+        "duplicateReplies": 0,
+        "dispatches": 5,
+        "adapterCalls": 5,
+        "deniedDispatches": 0,
+        "failures": 1,
+        "elapsedMs": 62715,
+        "fixedDelivery": 1,
+        "accepted": 0,
+        "roomAccepted": 0,
+        "protocolPending": 1,
+        "unreviewed": 0
+      },
+      "finalAnswer": {
+        "sampleSize": 12,
+        "rawDataAvailable": false,
+        "numericScore": null,
+        "verdict": "insufficient_evidence"
+      },
+      "score": {
+        "correct": true,
+        "omitted": [],
+        "wrong": [],
+        "expected": {
+          "sampleSize": 12,
+          "rawDataAvailable": false,
+          "numericScore": null,
+          "verdict": "insufficient_evidence"
+        }
+      },
+      "failures": [
+        {
+          "trialId": "paper-missing-data/0/work",
+          "index": 4,
+          "phase": 1,
+          "sessionId": "reviewer",
+          "error": "pilot request exceeds the fixed 50 KB input limit"
+        }
+      ],
+      "providerCalls": 4,
+      "providerReportedTotalTokens": 47202,
+      "recordedProviderConfigurations": [
+        {
+          "dispatchIndex": 0,
+          "provider": "deepseek-official",
+          "model": "deepseek-flash",
+          "parameters": {
+            "maxTokens": 2048,
+            "reasoningEffort": "high"
+          },
+          "finishReason": "stop",
+          "complete": true
+        },
+        {
+          "dispatchIndex": 1,
+          "provider": "deepseek-official",
+          "model": "deepseek-flash",
+          "parameters": {
+            "maxTokens": 2048,
+            "reasoningEffort": "high"
+          },
+          "finishReason": "stop",
+          "complete": true
+        },
+        {
+          "dispatchIndex": 2,
+          "provider": "deepseek-official",
+          "model": "deepseek-flash",
+          "parameters": {
+            "maxTokens": 2048,
+            "reasoningEffort": "high"
+          },
+          "finishReason": "stop",
+          "complete": true
+        },
+        {
+          "dispatchIndex": 3,
+          "provider": "deepseek-official",
+          "model": "deepseek-flash",
+          "parameters": {
+            "maxTokens": 2048,
+            "reasoningEffort": "high"
+          },
+          "finishReason": "stop",
+          "complete": true
+        }
+      ]
+    }
+  ],
+  "providerTotals": {
+    "originalCollaborationPilot": {
+      "calls": 12,
+      "totalTokens": 110672
+    },
+    "separateReviewerDiagnostics": {
+      "calls": 2,
+      "totalTokens": 17008
+    },
+    "earlierPersonalContextPilot": {
+      "calls": 6,
+      "totalTokens": 4247
+    },
+    "sharedAccounting": {
+      "calls": 20,
+      "totalTokens": 131927,
+      "maxCalls": 20,
+      "pendingReservations": 0
+    }
+  },
+  "sourceCodeHashes": {
+    "algorithm": "SHA-256 of original source file bytes at pilot start",
+    "files": {
+      "scripts/collaboration-eval.mjs": "1dde99f74fe19f9a3c05af981cc318f17470176ea73bbb8b99762aca16b13ba6",
+      "scripts/dsh-no-tools-adapter.mjs": "74e331ab7153c47d6a09d95118e3424696ca3bc7a99605994f9280f48b039bdb",
+      "scripts/dsh-pilot-provider.mjs": "8abe4686cf4b8b23729e46d10d25b3f16b7ab571eb616deeefacdccb0f22c8c1",
+      "lib/room-store.js": "385523edb1f2961a69ab6b4000c49160512b71e31bdc535d8840eb825852f159"
+    },
+    "scope": "Working-tree snapshot at test time; later product fixes are not covered by this model pilot."
+  },
+  "originalEvidence": {
+    "bundleId": "collaboration-model-pilot-20260928",
+    "hashAlgorithm": "SHA-256 of unmodified private original bytes; not hashes of these sanitized summaries",
+    "files": {
+      "manifest.json": "83d3594e4fe6a93733452d6a3a094426eaf6d8ae212617bf3b84e54299016a9a",
+      "results.json": "fa9d436522dc9a6eeac6e8998eacf9515b8605dd3246a7ff7dfcb2db39c9b5bc",
+      "summary.json": "44b7f67d1aa6e72fc7362a091c260a23425111efcd49b540cadaf95e0fb4ecfc",
+      "single/calls.jsonl": "75fb5fbf4b755559a5544cbb96f2cbe60e4e5ec97d6cd1b4c6ef30157fc646fd",
+      "single/result.json": "71c5d012cf581654fe29e8b44494a4484da4c7d676e672b2c6bf2a6e12ee23ef",
+      "single/room.snapshot.json": "c93663b89021592153547cd91ae693c4e97760ab9051318c0a238234c337a175",
+      "legacy/calls.jsonl": "d8cc65d211de6636fb9a825d5b3a6eea52118228ea9b8b42e37c48cb8a08d9b5",
+      "legacy/result.json": "ce2d066e9d4b05348ea0a4327c131e37190576ff6e039bcc5fa67280b6890fa0",
+      "legacy/room.snapshot.json": "1f0a139665c9af4c3f5a711194a6b644d9a8be82440ea969f6ba4149d174f381",
+      "work/calls.jsonl": "cc66c4f84672890a93655249457e148f583863312e34f83379b73af9e9e5ae70",
+      "work/result.json": "81afe8d4026da3868c045548714e01eab12d8fffba7c18d23b75a35f381bf758",
+      "work/room.snapshot.json": "587eda46460664be7869b2192725dd2f10ab95ebb6f1531968fdf302328180e4"
+    }
+  },
+  "limitations": [
+    "n=1 per arm; sample variance cannot be estimated.",
+    "Failures are retained, including two output truncations and one pre-provider input rejection.",
+    "Single-agent has no independent reviewer; task acceptance is not a like-for-like effectiveness comparison.",
+    "Exactly repeated text is only a lower bound on semantic repetition.",
+    "Provider build, internal transport retries and reasoning token counts are not reported.",
+    "No evidence of general collaboration gains, longitudinal personality stability, or long-task memory quality.",
+    "Raw trial transcripts and snapshots are retained outside the repository and are not included in this evidence bundle."
+  ]
+}

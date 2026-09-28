@@ -7,13 +7,15 @@
 | 要處理的問題 | 先讀 | 主要程式 |
 | --- | --- | --- |
 | 組隊、對話、草稿與工作流程 | [使用指南](docs/guide.md) | `collaboration-workspace.js`、`conversation-model.js`、`room-store.js` |
+| 工作責任、請求與額度 | [工作流程](docs/collaboration-workflow.md) | `collaboration-policy.js`、`collaboration-requests.js`、`collaboration-budget.js` |
+| 契約、固定成果與精確驗收 | [工作流程](docs/collaboration-workflow.md) | `work-contract.js`、`artifact-versions.js`、`room-store.js` |
 | Agent 身分、人格與來源可見性 | [記憶架構](docs/agent-memory-architecture.md) | `agent-directory.js`、`agent-persona.js`、`agent-memory.js` |
-| 召回、整理、衰減與信念 | [記憶生命週期](docs/memory-lifecycle.md) | `agent-memory-index.js`、`memory-lifecycle.js` |
+| 召回、整理、衰減與信念 | [記憶生命週期](docs/memory-lifecycle.md) | `agent-memory-index.js`、`memory-lifecycle.js`、`personal-context.js`、`personal-learning.js` |
 | 提交、崩潰恢復與快照 | [記憶架構的提交邊界](docs/agent-memory-architecture.md) | `room-journal.js`、`event-log.js` |
 | 配額、冷檔與維護寫入 | [儲存契約](docs/storage-capacity.md) | `storage-capacity.js`、`cold-log.js` |
 | HTTP、工具或原生上下文註冊 | [使用指南](docs/guide.md)、[部署與維護](docs/operations.md) | `index.js` |
 | 研究指標、run 或人格評測 | [實驗與評測](docs/experiments.md)、[縱向試驗](docs/persona-longitudinal.md) | `experiment.js`、`relationship.js`、`scripts/*eval*`、`scripts/persona-longitudinal.mjs` |
-| 界面 | [使用指南](docs/guide.md) | `client.js`、`group-ui.js`、`team-ui.js`、`workspace-ui.js` |
+| 界面 | [使用指南](docs/guide.md) | `client.js`、`collaboration-ui.js`、`group-ui.js`、`team-ui.js`、`workspace-ui.js` |
 
 上表程式位於 `lib/`，另有標明 `scripts/` 的入口。`room-store.d.ts` 和 `index.d.ts` 定義對外型別。
 
@@ -35,7 +37,7 @@ npm ci
 npm run check
 ```
 
-`check` 檢查生成內容、語法與全部 Node 測試。修改 `lib/text-protocol.js` 或 `lib/work-protocol.js` 後，先執行 `npm run build` 更新 `lib/client.js` 的共享協議區塊。
+`check` 檢查生成內容、語法與全部 Node 測試。修改共享協議或 `*-ui.js` 的生成模組後，先執行 `npm run build` 更新 `lib/client.js` 的共享協議區塊。
 
 原生整合測試透過 `DSH_MODULES_DIR` 載入已安裝 DSH 的依賴。指定目錄應是 DSH 套件內的 `node_modules`；報告測試結果時保留跳過項，不能把未執行的原生整合算作通過。
 

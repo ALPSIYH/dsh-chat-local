@@ -49,7 +49,8 @@ async function harness(options = {}) {
       await service.observeSessionEvent(call.to, { type: "turn/end", data: { turn, reason: { kind: "completed" } } });
     },
     async room(name = "工作流验证") {
-      return service.createRoom({ name, autoDeliver: true, members: ["秘书", "执行", "复核"].map((alias, i) => ({ kind: "session", sessionId: `s${i + 1}`, alias })) });
+      // These cases exercise the historical textual-submission and handoff protocol.
+      return service.createRoom({ collaboration:{strategy:"legacy"},name, autoDeliver: true, members: ["秘书", "执行", "复核"].map((alias, i) => ({ kind: "session", sessionId: `s${i + 1}`, alias })) });
     },
     async activate(room, sessionId = "s1", text = "请登记讨论结论，核对依据并明确交接与验收。") {
       await service.stopRoom(room.id);
@@ -311,6 +312,31 @@ test("decision notification targets the proposer and related owner without inter
     decision=await h.service.updateLedgerEntry(room.id,decision.id,{status:"proposed"},{expectedRevision:deferred.revision});
     const sent=await h.service.updateLedgerEntry(room.id,decision.id,{status:"decided",notifyParticipants:true},{expectedRevision:decision.revision});assert.equal(sent.notification.state,"sent");assert.deepEqual(sent.notification.sessionIds,["s1","s2"]);
     const notice=(await h.service.messages(room.id)).find(m=>m.author==="system:decision");assert.deepEqual(notice.mentions,["session:s1","session:s2"]);
+  }finally{await h.cleanup();}
+});
+
+test("decision notification cannot acknowledge an update replaced by restore while notification save is pending",async()=>{
+  const h=await harness();try{
+    const room=await h.room();
+    const task=await h.service.createLedgerEntry(room.id,taskFields());
+    const decision=await h.service.createLedgerEntry(room.id,{kind:"decision",title:"待决事项",relatedEntryIds:[task.id]});
+    const snapshot=JSON.parse((await h.service.snapshotRun(room.id,"before-notification")).content);
+    let release,entered;const held=new Promise(resolve=>{release=resolve;}),ready=new Promise(resolve=>{entered=resolve;});
+    const commit=h.service.journal.commit.bind(h.service.journal);let armed=true;
+    h.service.journal.commit=async state=>{
+      const result=await commit(state);
+      if(armed&&state.rooms.find(item=>item.id===room.id)?.messages.some(message=>message.author==="system:decision")){
+        armed=false;entered();await held;
+      }
+      return result;
+    };
+    const pending=h.service.updateLedgerEntry(room.id,decision.id,{status:"decided",notifyParticipants:true},{expectedRevision:decision.revision});pending.catch(()=>{});
+    try{
+      await ready;await h.service.restoreFromSnapshot(snapshot,{confirm:true});release();
+      await assert.rejects(pending,/superseded|interrupted|changed/i);
+      assert.equal((await h.service.listLedger(room.id)).find(item=>item.id===decision.id).status,"proposed");
+      assert.ok(!(await h.service.messages(room.id)).some(message=>message.author==="system:decision"));
+    }finally{release();h.service.journal.commit=commit;await Promise.allSettled([pending]);}
   }finally{await h.cleanup();}
 });
 

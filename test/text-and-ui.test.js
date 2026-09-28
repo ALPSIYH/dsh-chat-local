@@ -19,11 +19,12 @@ async function senderHarness() {
   const sender=source.slice(source.indexOf("        const send = async () => {"),source.indexOf("        const previewArtifact ="));
   const storage=new Map(), calls=[];
   const context={
-    selectedRoom:{id:"room"},selectedIdRef:{current:"room"},draft:"待确认消息",draftRef:{current:"待确认消息"},mentionAll:false,mentionIds:["s1"],sending:false,
+    selectedRoom:{id:"room"},messagePurpose:"request",messageWorkId:"work",participants:[{sessionId:"s1"}],selectedIdRef:{current:"room"},draft:"待确认消息",draftRef:{current:"待确认消息"},mentionAll:false,mentionIds:["s1"],sending:false,
     historyModeRef:{current:false},pendingSends:{current:new Map()},roomUiRef:{current:new Map()},messages:[],error:"",notice:"",HUMAN_ID:"human:me",
     sessionStorage:{setItem:(k,v)=>storage.set(k,v),removeItem:k=>storage.delete(k)},
     setHistoryMode(){},rememberRoomUi(id,patch){context.roomUiRef.current.set(id,{...context.roomUiRef.current.get(id),...patch});},
     setDraft(value){context.draft=value;context.draftRef.current=value;},setMentionAll(value){context.mentionAll=value;},setMentionIds(value){context.mentionIds=value;},
+    setMessagePurpose(value){context.messagePurpose=value;},setMessageWorkId(value){context.messageWorkId=value;},
     setSending(value){context.sending=value;},setError(value){context.error=value;},setNotice(value){context.notice=value;},setMessages(update){context.messages=update(context.messages);},
     async api(path,options){calls.push({path,...options,body:JSON.parse(options.body)});return context.respond(calls.at(-1));},respond:()=>({id:"saved",scheduledCount:1})
   };
@@ -45,6 +46,8 @@ test("UI send preserves its operation id and recipients across an uncertain-resp
   h.context.respond=()=>({id:"saved"});await h.run();
   assert.equal(h.calls[0].body.clientOperationId,h.calls[1].body.clientOperationId);
   assert.deepEqual(h.calls[0].body.mentions,h.calls[1].body.mentions);
+  assert.deepEqual(h.calls[0].body.recipientSessionIds,["s1"]);assert.deepEqual(h.calls[1].body.recipientSessionIds,["s1"]);
+  assert.equal(h.calls[0].body.purpose,"request");assert.equal(h.calls[1].body.workId,"work");
 });
 
 test("UI send never overwrites a new draft or a different room after an async failure",async()=>{
@@ -54,6 +57,11 @@ test("UI send never overwrites a new draft or a different room after an async fa
   assert.equal(h.context.draft,"新的草稿");assert.match(h.context.error,/未被覆盖/);
   h.context.draft="另一条消息";const switched=h.run();h.context.selectedIdRef.current="another-room";h.context.setDraft("另一个房间的草稿");reject(new Error("连接中断"));await switched;
   assert.equal(h.context.draft,"另一个房间的草稿");assert.equal(h.context.messages.length,0);
+});
+
+test("UI auto purpose defers to the room policy instead of forcing coordinator routing in discussion mode",async()=>{
+ const h=await senderHarness();h.context.messagePurpose="auto";h.context.selectedRoom.collaboration={strategy:"discussion"};await h.run();
+ assert.equal(Object.hasOwn(h.calls[0].body,"purpose"),false);
 });
 
 async function sessionNavigationHarness(ctx, prepareParticipant = async () => {}) {

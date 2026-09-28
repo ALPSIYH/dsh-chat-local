@@ -76,6 +76,8 @@ async function harness(options = {}) {
 
 async function roomWithMembers(service, aliases) {
   return await service.createRoom({
+    // Preserve the pre-v18 routing contract in these legacy regression cases.
+    collaboration: {strategy:"legacy"},
     name: "研究组",
     autoDeliver: true,
     members: aliases.map((alias, index) => ({ kind: "session", sessionId: `s${index + 1}`, alias }))
@@ -296,7 +298,7 @@ test("charter revisions and source snapshots persist after restart, including us
     assert.equal(memory.history.length, 1);
     assert.equal("profileHistory" in (await restarted.listRooms())[0], false, "room polling does not duplicate the entire archive");
     const disk = JSON.parse(await readFile(h.path, "utf8"));
-    assert.equal(disk.version, 17);
+    assert.equal(disk.version, 18);
   } finally { if (restarted) await restarted.close(); await h.cleanup(); }
 });
 
@@ -931,7 +933,7 @@ test("migrates v1 copied agent records into v15 membership and a group without c
       { sessionId: "session-1", alias: "旧 Agent", ownership: "provisioned" }
     ]);
     const disk = JSON.parse(await readFile(h.path, "utf8"));
-    assert.equal(disk.version, 17);
+    assert.equal(disk.version, 18);
     assert.deepEqual(disk.rooms[0].ledger, []);
     assert.equal("agents" in disk, false);
     assert.equal("model" in disk.rooms[0].members[0], false);

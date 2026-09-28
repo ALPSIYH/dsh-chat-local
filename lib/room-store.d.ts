@@ -1,5 +1,18 @@
 import type { DshChatLocalConfig } from "./index.js";
 
+export interface ArtifactReference { artifactId: string; versionId: string; contentHash: string; }
+export type WorkInputReference = (ArtifactReference & {kind:"artifact"}) | {kind:"work";entryId:string;submissionRevision:number;contractHash:string};
+export interface WorkCoverage { satisfied:string[];missing:string[];impact:string; }
+export interface ObservationReference {sourceRoomId:string;evidenceId:string;}
+export interface MemoryUpdate {
+  roomId?:string;operationId:string;
+  action:"pin"|"unpin"|"suppress"|"restore"|"belief"|"revoke_belief"|"lesson"|"adopt_lesson"|"reject_lesson"|"retire_lesson"|"challenge_belief"|"review_snapshot";
+  sourceRoomId?:string;evidenceId?:string;beliefId?:string;supersedes?:string;claim?:string;evidence?:ObservationReference[];
+  scope?:{roomId?:string;workId?:string;topic?:string};validFrom?:number;validUntil?:number;counterEvidence?:ObservationReference[];
+  reason?:string;lessonId?:string;conditions?:string;resultEvidence?:ObservationReference[];
+  trigger?:{kind:"correction"|"review_failed"|"confirmed_result"|"manual";evidence:ObservationReference[]};workId?:string;excludedEvidence?:ObservationReference[];
+}
+export interface CollaborationPolicy {strategy:"work"|"discussion"|"legacy";coordinatorSessionId?:string|null;expectedRevision?:number;budget?:{maxExecutions?:number;maxPerMember?:number;integrationReserve?:number;reviewReserve?:number};}
 export interface NativeContextStatus {
   state: "available" | "suppressed" | "unavailable" | "not_observed";
   message: string;
@@ -64,6 +77,11 @@ export declare class DshChatLocalService {
   commitLedgerManagement(roomId: string, batchId: string, input?: any): Promise<any>;
   triageLedgerEntry(roomId: string, entryId: string, input: any): Promise<any>;
   deliverSavedMessage(roomId: string, operationId: string): Promise<any>;
+  setCollaborationPolicy(roomId:string,input:CollaborationPolicy):Promise<any>;
+  collaborationOverview(roomId:string,sessionId?:string):Promise<any>;
+  resolveCollaborationRequest(roomId:string,input:{requestId:string;expectedRevision:number;resolution:string|{disposition:"accepted"|"rejected"|"needs_evidence"|"answered"|"result_checked";summary:string};sourceMessageIds:string[]},sessionId?:string):Promise<any>;
+  publishArtifact(roomId:string,sessionId:string|null,input:{operationId:string;entryId:string;expectedRevision:number;path?:string;content?:string;logicalName?:string;mediaType?:string}):Promise<any>;
+  readArtifactVersion(roomId:string,sessionId:string|null,input:{artifactId:string;versionId:string;contentHash?:string;startLine?:number;maxLines?:number}):Promise<any>;
   listRooms(): Promise<any[]>;
   listDeletedRooms(): Promise<any[]>;
   messages(roomId: string, limit?: number): Promise<any[]>;
@@ -109,15 +127,15 @@ export declare class DshChatLocalService {
   /** Own identity is resolved from the executing session; room only disambiguates membership. */
   agentIdentity(sessionId: string, roomId?: string): Promise<any>;
   /** Optional native system-prompt context, absent for unbound or group-turn sessions. */
-  nativeAgentContext(sessionId: string): Promise<string | null>;
+  nativeAgentContext(sessionId: string, input?: {query?:string;workId?:string;triggerEventId?:string}): Promise<string | null>;
   /** Capability observed at the latest native prompt assembly, not model adoption. */
   nativeContextStatus(sessionId: string): NativeContextStatus;
   /** Exact Host inbox claim before prompt assembly; scopes restricted group tools. */
   observeNativeInputClaim(input: { agent: any; message: any; turn: number }): void;
   /** Read only personally observed sources bound to this identity. */
-  agentMemory(sessionId: string, input?: { roomId?: string; query?: string; limit?: number; mode?: "default" | "explicit" }): Promise<any>;
+  agentMemory(sessionId: string, input?: { roomId?: string; query?: string; limit?: number; mode?: "default" | "explicit"; workId?:string;triggerEventId?:string;reviewSnapshotId?:string;includeCandidates?:boolean }): Promise<any>;
   /** Own lifecycle edits require current personally observed evidence and an idempotency key. */
-  updatePersonalMemory(sessionId: string, input: { roomId?: string; action: "pin" | "unpin" | "suppress" | "restore" | "belief" | "revoke_belief"; operationId: string; sourceRoomId?: string; evidenceId?: string; claim?: string; evidence?: { sourceRoomId: string; evidenceId: string }[]; supersedes?: string; beliefId?: string }): Promise<any>;
+  updatePersonalMemory(sessionId: string, input: MemoryUpdate): Promise<any>;
   /** Human storage operation; not exposed as an Agent tool. */
   maintainMemoryStorage(input: { sourceRoomId: string; action: "archive" | "thaw" | "cleanup" }): Promise<any>;
   deleteRoom(roomId: string, input: any): Promise<any>;

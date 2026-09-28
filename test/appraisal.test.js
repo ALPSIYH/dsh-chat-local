@@ -71,7 +71,7 @@ async function bootPlugin() {
     assert.equal(parsed.ok, true, parsed.error);
     return parsed.value;
   };
-  const room = await request("/rooms", { name: "判断层", autoDeliver: true,
+  const room = await request("/rooms", { collaboration: { strategy: "legacy" }, name: "判断层", autoDeliver: true,
     members: [{ kind: "session", sessionId: "s1", alias: "甲" }, { kind: "session", sessionId: "s2", alias: "乙" }] });
   let turn = 0;
   return {

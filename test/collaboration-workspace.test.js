@@ -175,7 +175,7 @@ test("loading an incomplete v15 identity migration persists its repair before re
   const reopened=new DshChatLocalService(h.ctx,{path:h.path});
   try{
     const loaded=await reopened.resolveRoom(room.id),disk=JSON.parse(await readFile(h.path,"utf8"));
-    assert.ok(loaded.members[0].agentId);assert.equal(disk.version,17);assert.equal(disk.workspace.agents.length,1);assert.equal(disk.workspace.participations.length,1);
+    assert.ok(loaded.members[0].agentId);assert.equal(disk.version,18);assert.equal(disk.workspace.agents.length,1);assert.equal(disk.workspace.participations.length,1);
     assert.equal(disk.rooms[0].members[0].agentId,loaded.members[0].agentId);assert.equal(disk.rooms[0].members[0].participationId,loaded.members[0].participationId);
     assert.deepEqual(disk.rooms[0].messages,old.rooms[0].messages);assert.deepEqual(disk.rooms[0].ledger,old.rooms[0].ledger);
   }finally{await reopened.close();}
@@ -434,7 +434,7 @@ test("management is a fixed revision batch, skips changed items and terminates w
 }));
 
 test("archived accepted results can be shown without reopening; unfinished history is paused, not invented as cancelled",()=>fixture(async h=>{
-  const room=await h.service.createRoom({name:"历史"});let done=await h.service.createLedgerEntry(room.id,{kind:"task",title:"完成事项"});
+  const room=await h.service.createRoom({name:"历史",collaboration:{strategy:"legacy"}});let done=await h.service.createLedgerEntry(room.id,{kind:"task",title:"完成事项"});
   done=await h.service.updateLedgerEntry(room.id,done.id,{status:"done"},{expectedRevision:done.revision});
   let archived=await h.service.triageLedgerEntry(room.id,done.id,{action:"archive",operationId:"archive",expectedRevision:done.revision});
   const visible=await h.service.triageLedgerEntry(room.id,done.id,{action:"show",operationId:"show",expectedRevision:archived.revision});assert.equal(visible.status,"done");assert.ok(visible.review);
@@ -485,7 +485,7 @@ test("a failed dispatch intent save can be retried when Host was definitely not 
 }));
 
 test("archival cycles do not restore obsolete completion into a new work cycle",()=>fixture(async h=>{
-  const room=await h.service.createRoom({name:"历史轮次"});let entry=await h.service.createLedgerEntry(room.id,{kind:"task",title:"完成过的工作"});entry=await h.service.updateLedgerEntry(room.id,entry.id,{status:"done"},{expectedRevision:entry.revision});
+  const room=await h.service.createRoom({name:"历史轮次",collaboration:{strategy:"legacy"}});let entry=await h.service.createLedgerEntry(room.id,{kind:"task",title:"完成过的工作"});entry=await h.service.updateLedgerEntry(room.id,entry.id,{status:"done"},{expectedRevision:entry.revision});
   for(const action of ["archive","show","resume","archive","show"])entry=await h.service.triageLedgerEntry(room.id,entry.id,{action,expectedRevision:entry.revision,operationId:crypto.randomUUID()});
   assert.equal(entry.status,"paused");assert.ok(!entry.review);
 }));

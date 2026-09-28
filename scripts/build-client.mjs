@@ -3,6 +3,7 @@ import { createTextProtocol } from "../lib/text-protocol.js";
 import { createWorkProtocol } from "../lib/work-protocol.js";
 import { createWorkspaceComposer } from "../lib/workspace-ui.js";
 import { createTeamUI } from "../lib/team-ui.js";
+import { createCollaborationUI } from "../lib/collaboration-ui.js";
 import { createGroupUI } from "../lib/group-ui.js";
 const path=new URL("../lib/client.js",import.meta.url);
 const source=await readFile(path,"utf8");
@@ -17,6 +18,6 @@ next=next.slice(0,workFrom)+`${workBegin}\n    const workProtocol = (${createWor
 const startBegin="      // BEGIN GENERATED WORKSPACE COMPOSER",startEnd="      // END GENERATED WORKSPACE COMPOSER";
 const startFrom=next.indexOf(startBegin),startTo=next.indexOf(startEnd);
 if(startFrom<0||startTo<startFrom)throw new Error("workspace composer markers missing");
-next=next.slice(0,startFrom)+`${startBegin}\n      const TeamUI = (${createTeamUI.toString()})(React,h,api,ctx);\n      const GroupUI = (${createGroupUI.toString()})(React,h,api,TeamUI);\n      const WorkspaceComposer = (${createWorkspaceComposer.toString()})(React,h,api,ctx,TeamUI);\n${startEnd}`+next.slice(startTo+startEnd.length);
+next=next.slice(0,startFrom)+`${startBegin}\n      const CollaborationUI = (${createCollaborationUI.toString()})(React,h,api);\n      const TeamUI = (${createTeamUI.toString()})(React,h,api,ctx);\n      const GroupUI = (${createGroupUI.toString()})(React,h,api,TeamUI);\n      const WorkspaceComposer = (${createWorkspaceComposer.toString()})(React,h,api,ctx,TeamUI);\n${startEnd}`+next.slice(startTo+startEnd.length);
 if(process.argv.includes("--check")){if(next!==source)throw new Error("Client protocol is stale; run npm run build");}
 else if(next!==source) await writeFile(path,next);

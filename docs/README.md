@@ -21,6 +21,8 @@
 | [實驗與評測](experiments.md) | 房間計數、主觀評價、比較條件、run manifest 與描述性報告。 |
 | [人格縱向試驗](persona-longitudinal.md) | 連續工作、跨 Session／重啟、隔離探測、預算和評分方法。 |
 
+- [工作契約、成果版本與處理請求](collaboration-workflow.md)
+
 ## 歷史資料
 
 下列文件保留當時的方案與問題，不作為現行行為、安裝步驟或待辦清單。

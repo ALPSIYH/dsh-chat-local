@@ -11,11 +11,11 @@ Build a team, start separate conversations for different topics, and let members
 | Feature | What it does |
 | --- | --- |
 | Teams and conversations | Reuse members and default settings while keeping each conversation's messages, work ledger, and permissions separate. |
-| Agent interaction | Consult members in order or address them with `@` mentions. Agents can pass work to one another within bounded turn budgets. |
-| Work ledger | Track owners, evidence, progress, and submissions, with acceptance recorded by the designated reviewer. |
+| Agent interaction | New conversations route requests by responsibility. Notifications do not wake everyone; corrections and objections retain an explicit disposition. Existing conversations retain their previous strategy. |
+| Work and artifacts | Pin responsibility, inputs, and acceptance criteria to a contract. Store retrievable immutable results and review the exact submitted versions. |
 | Persona Markdown | Define each agent's personality, communication preferences, and working habits, with version history and conflict handling. |
 | Personal long-term memory | Build memory from material actually delivered or read, and from the agent's own output, retaining references to its sources. |
-| Memory maintenance | Deduplicate repeated material, reduce older material's default recall priority, and support pinning and reversible suppression. |
+| Memory and learning | Retrieve personally observed material for the current work. Sourced method candidates can be adopted, rejected, or retired; beliefs can carry counter-evidence. |
 | Execution and permissions | Run members through real DSH sessions, using the host's models, tools, sandbox, and approval settings. |
 
 ## Getting started
@@ -53,7 +53,7 @@ Saved settings apply to subsequent turns. Personas are not rewritten automatical
 
 Create a group, choose its members, and start a conversation for a topic. Use the team defaults or adjust the participants, working directory, and permissions for that conversation.
 
-With automatic collaboration enabled (**自動協作** or **自动协作**, depending on the view), ordinary messages consult members in order. Use `@alias` to direct a handoff. The ledger at the top tracks ownership, submissions, and acceptance. Saving member or team settings alone does not start a model call.
+New conversations without a selected strategy default to work routing; reused group templates keep their saved strategy. Work routing sends ordinary requests to the responsible member, falling back to a coordinator before work is assigned. Choose a message purpose, recipient, and work item in the composer. Names mentioned in prose do not dispatch work. The overview separates pending requests, execution budgets, and acceptance. Existing conversations retain legacy routing until explicitly switched while idle. Saving member or team settings alone does not start a model call.
 
 See the [User guide](docs/guide.md) for the full workflow.
 
@@ -63,7 +63,8 @@ See the [User guide](docs/guide.md) for the full workflow.
 Persistent agent identity
 ├── Persona: user-maintained PERSONA.md
 ├── Experiences: material actually received, read, or authored
-├── Beliefs: evidence-backed interpretations the agent can revise
+├── Beliefs: revisable interpretations with scope, validity, and counter-evidence
+├── Methods: sourced learning candidates with explicit adoption
 └── Appraisals: the agent's sourced judgments about other agents
 ```
 
@@ -74,7 +75,7 @@ Automatic consolidation currently means **deduplication that preserves source te
 ## Before you use it
 
 - **Permissions affect real sessions.** Workspace-write and full-access settings may remain active after leaving group chat. Members sharing a working directory also operate on the same files. See [Permissions and shared sessions](docs/guide.md#權限與共享會話).
-- **Data is stored locally.** The default directory is `~/.dsh/dsh-chat-local/`, and the current state format is v17. Rolling back to an incompatible older version also requires restoring data compatible with that version.
+- **Data is stored locally.** The default directory is `~/.dsh/dsh-chat-local/`, and the current state format is v18. Rolling back to an incompatible older version also requires restoring data compatible with that version.
 - **Memory has visibility and capacity limits.** Unreceived material, native history from before the plugin was mounted, and non-text content do not automatically become memories. Capacity limits can prevent new writes; unlimited history is not guaranteed.
 - **The local management API does not authenticate callers.** Private-memory isolation in agent tools does not protect against programs with access to local files or the management API. Logs and persona files are not encrypted.
 - **Traceability does not establish truth.** Logs support provenance and integrity checks, but models can still reason incorrectly. Passing tests or producing consistent short-term replies does not demonstrate a complete simulation of a person.
@@ -85,7 +86,7 @@ Chinese remains the default documentation language. The detailed guides linked b
 
 | Task | Read |
 | --- | --- |
-| Build teams, start conversations, hand off work, and set permissions | [User guide](docs/guide.md) |
+| Build teams, start conversations, hand off work, and set permissions | [User guide](docs/guide.md) · [Contracts and collaboration](docs/collaboration-workflow.md) |
 | Configure consolidation, decay, pinning, and beliefs | [Memory lifecycle](docs/memory-lifecycle.md) |
 | Upgrade, back up, check health, and recover data | [Operations](docs/operations.md) |
 | Understand data flow, storage, and implementation boundaries | [Agent memory architecture](docs/agent-memory-architecture.md) · [Storage capacity and cold logs](docs/storage-capacity.md) |

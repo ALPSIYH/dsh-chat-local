@@ -46,7 +46,7 @@ async function harness(roomName = "行动治理门") {
   };
   const service = new DshChatLocalService(ctx, { path: join(directory, "rooms.json"), replyTimeoutMs: 5_000 });
   await service.ready;
-  const room = await service.createRoom({ name: roomName, autoDeliver: true,
+  const room = await service.createRoom({ collaboration: { strategy: "legacy" }, name: roomName, autoDeliver: true,
     members: [{ kind: "session", sessionId: "s1", alias: "甲" }] });
   const state = () => service.state.rooms.find((item) => item.id === room.id);
   async function openTurn(call) {
@@ -111,13 +111,14 @@ const GATE_OFF_OUTCOMES = [
  * Host compatibility adds 183 characters separating native Agent Teams from
  * this room's coworkers, routing and ledger; the gate-off fixture records that
  * intentional prompt change without filtering it out.
+ * Evidence-bound learning guidance adds 130 characters (including paragraph separators).
  * UUID normalization is the only transformation used in the actual assertions;
  * neither extra event types nor unexpected prompt changes are filtered out.
  */
 const MEMORY_GATE_OFF_EVENT_TYPES = ["member.added", "message.created", "message.created", "turn.scheduled", "relationship.snapshot", "turn.prompt", "injection.cost", "delivery.settled", "message.created", "turn.scheduled", "relationship.snapshot", "turn.prompt", "injection.cost", "delivery.sent", "memory.observed", "delivery.settled"];
 const MEMORY_GATE_OFF_PROMPTS = [
-  { chars: 3064, sha256: "d356a26c0b93fb90e5e189a290bb308a8a5e2904080a71f7ef909f6cf68dd1b0" },
-  { chars: 3120, sha256: "6260352d1f0f4073164824f7ec1cedbdebad1cd1289187c1734489dd18de0448" },
+  { chars: 3194, sha256: "a4a964d013b0a73e20fa599a1104c9b73f2e98fc2e2533369162bd103e351b6c" },
+  { chars: 3250, sha256: "6978c03252afe0ede57692a0272eac4d269f7b4b1aee47e93a4a6f64b5990354" },
 ];
 const UUID = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g;
 

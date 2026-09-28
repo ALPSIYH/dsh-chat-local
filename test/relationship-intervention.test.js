@@ -48,7 +48,8 @@ async function harness(config = {}, { onDeliver } = {}) {
   };
   const service = new DshChatLocalService(ctx, { path: join(directory, "rooms.json"), maxRounds: 1, replyTimeoutMs: 800, ...config });
   await service.ready;
-  const room = await service.createRoom({ name: "实验房间", autoDeliver: true,
+  // Keep the experiment fixture's two-recipient exposure contract explicit.
+  const room = await service.createRoom({ collaboration:{strategy:"legacy"}, name: "实验房间", autoDeliver: true,
     members: [{ kind: "session", sessionId: "s1", alias: "甲" }, { kind: "session", sessionId: "s2", alias: "乙" }] });
   return { directory, service, room, calls, ctx,
     close: async () => { await service.close(); await rm(directory, { recursive: true, force: true }); } };
@@ -414,7 +415,7 @@ test("one episode is one reset, even when a failed delivery is retried", async (
     if (failing) { failing = false; throw new Error("temporary bridge failure"); }
   } });
   try {
-    const room = await h.service.createRoom({ name: "重试房间", autoDeliver: true,
+    const room = await h.service.createRoom({ collaboration:{strategy:"legacy"},name: "重试房间", autoDeliver: true,
       members: [{ kind: "session", sessionId: "s1", alias: "甲" }] });
     await h.service.startRun(room.id, { arm: "reset_per_episode", appliedBy: "human" });
     const original = await h.service.send({ roomId: room.id, author: "human:me", authorKind: "human", text: "重试我" });

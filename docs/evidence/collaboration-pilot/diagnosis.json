@@ -1,0 +1,167 @@
+{
+  "schemaVersion": 1,
+  "evidenceKind": "sanitized-derived-diagnosis",
+  "date": "2026-09-28",
+  "conclusive": false,
+  "originalRunsPreserved": true,
+  "sourceArtifacts": {
+    "bundleId": "collaboration-model-pilot-20260928",
+    "hashAlgorithm": "SHA-256 of original bytes",
+    "files": {
+      "failed-review-request.json": "b9ccc1cd6f338c307b7f3254c99f95c7f0ac90695dce478a8f4a74c8e51464d6",
+      "compact-review-request.json": "8be5143577b61c71359f95e7a49bf9b9dcc41e78537a918e1e24c400b22c3eb2",
+      "context-diagnosis.json": "19135be8f546b6374e84580fa7a8239fbb3e8df7109e9426546836e95a498761",
+      "review-replay-high.json": "22674b98bc5841c1fb3d3c9d31e348730fd8c8d7b8c882faa34b2b273c108bbf",
+      "review-replay-low.json": "ebb2b2954deed7177e39f0164e31e1583eedeaa61ad2e77cf5db2ed92cb8f169",
+      "diagnosis-summary.json": "190829fa6ba41076bfbc02c5ea3e44024c902bb5b0aac8116619d1184cd2138e"
+    }
+  },
+  "contextFailure": {
+    "component": "evaluation harness context assembly",
+    "productWideClaim": false,
+    "requestBytes": 65715,
+    "deliveryBytes": 19654,
+    "memoryBytes": 40653,
+    "memorySubsectionsBytes": {
+      "messages": 17566,
+      "collaboration": 17008,
+      "ledger": 2617,
+      "myWork": 2617
+    },
+    "fixedContentBytes": 131,
+    "ownRequestBytes": 895,
+    "note": "Subsections overlap their parent and must not be added as independent parts; JSON envelope and escaping also consume bytes."
+  },
+  "projection": {
+    "beforeBytes": 65715,
+    "afterBytes": 26307,
+    "memoryBeforeBytes": 40653,
+    "memoryAfterBytes": 3551,
+    "deliveryBytes": 19654,
+    "fixedContentBytes": 131,
+    "maxBytes": 50000,
+    "replyMaxChars": 600,
+    "deduplicatedMessageCount": 15,
+    "additionalMessageCount": 0,
+    "preserves": [
+      "unaltered bridge delivery",
+      "fixed artifact content",
+      "full message text once",
+      "current contract and input references",
+      "corrections and objections",
+      "current submission and review",
+      "unreviewed state and own pending requests"
+    ],
+    "omits": [
+      "resolved request history",
+      "per-dispatch budget receipts",
+      "duplicate myWork",
+      "ledger activity history"
+    ],
+    "overflowPolicy": "fail and preserve rejected context; no substring truncation"
+  },
+  "outputTruncations": [
+    {
+      "arm": "legacy",
+      "dispatchIndex": 1,
+      "phase": 0,
+      "sessionRole": "reviewer",
+      "maxTokens": 2048,
+      "reasoningEffort": "high",
+      "outputTokens": 2048,
+      "visibleTextCharacters": 44,
+      "finishReason": "max-tokens",
+      "complete": false
+    },
+    {
+      "arm": "legacy",
+      "dispatchIndex": 4,
+      "phase": 1,
+      "sessionRole": "coordinator",
+      "maxTokens": 2048,
+      "reasoningEffort": "high",
+      "outputTokens": 2048,
+      "visibleTextCharacters": 651,
+      "finishReason": "max-tokens",
+      "complete": false
+    }
+  ],
+  "outputDiagnosis": {
+    "verified": "Both calls exhausted the configured output budget and returned incomplete JSON. The original reply had no concise length target; the coordinator repeated background and per-field explanations.",
+    "inference": "High reasoning and little visible text are consistent with unobserved reasoning consuming the output budget; reasoning-token counts were not provided, so its share and causal effect are unverified."
+  },
+  "independentReviewerReplays": [
+    {
+      "setting": "high",
+      "requestBytes": 26332,
+      "usage": {
+        "inputTokens": 7239,
+        "outputTokens": 1461,
+        "cacheReadTokens": 0,
+        "cacheWriteTokens": 0,
+        "totalTokens": 8700
+      },
+      "assessment": {
+        "complete": true,
+        "replyChars": 526,
+        "withinReplyBudget": true,
+        "reviewVerdict": "approve",
+        "score": {
+          "correct": true,
+          "omitted": [],
+          "wrong": [],
+          "expected": {
+            "sampleSize": 12,
+            "rawDataAvailable": false,
+            "numericScore": null,
+            "verdict": "insufficient_evidence"
+          }
+        }
+      },
+      "elapsedMs": 12401
+    },
+    {
+      "setting": "low",
+      "requestBytes": 26330,
+      "usage": {
+        "inputTokens": 7239,
+        "outputTokens": 1069,
+        "cacheReadTokens": 0,
+        "cacheWriteTokens": 0,
+        "totalTokens": 8308
+      },
+      "assessment": {
+        "complete": true,
+        "replyChars": 482,
+        "withinReplyBudget": true,
+        "reviewVerdict": "approve",
+        "score": {
+          "correct": true,
+          "omitted": [],
+          "wrong": [],
+          "expected": {
+            "sampleSize": 12,
+            "rawDataAvailable": false,
+            "numericScore": null,
+            "verdict": "insufficient_evidence"
+          }
+        }
+      },
+      "elapsedMs": 9405
+    }
+  ],
+  "diagnosticInterpretation": "Two independent stateless calls on the saved failed reviewer input after projection. They did not update the room, replace failed trials, or establish an arm-level or reasoning-setting advantage. Replay request byte counts include changed trial IDs and explicit reasoning parameters.",
+  "validation": {
+    "command": "node --test test/collaboration-eval.test.js",
+    "passed": 7,
+    "failed": 0,
+    "scope": "Targeted evaluation tests at time of the projection fix; not a claim about final full-suite execution.",
+    "packageDryRunVerified": [
+      "scripts/collaboration-eval.mjs",
+      "scripts/dsh-no-tools-adapter.mjs",
+      "scripts/model-pilot-budget.mjs",
+      "scripts/dsh-pilot-provider.mjs",
+      "scripts/personal-context-pilot.mjs"
+    ]
+  }
+}

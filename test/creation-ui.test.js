@@ -157,7 +157,7 @@ test('new conversation acknowledgement survives a failed list refresh and clears
 });
 
 test('empty-team composer offers member setup instead of claiming zero members will collaborate',()=>{
-  assert.match(source,/尚未添加成员 · 消息仅记录/);
+  assert.match(source,/尚未添加成員 · 訊息僅記錄/);
   assert.match(source,/先记录想法，或添加成员开始协作/);
   assert.match(source,/selectedRoom\.members\?\.length\?h\("button", \{ className: "dclMention"/);
 });

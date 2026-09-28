@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 1,
+  "evidenceKind": "sanitized-assessment-erratum",
+  "createdAt": "2026-09-28T13:49:09.029Z",
+  "rule": "answers[] entries with phase=0 in the original pilot and earlier scripted output were scored against a late correction not yet available. Those per-answer scores are invalid; treat them as unscored. Final metrics and summaries use only final phase=1 coordinator answers, so these are unchanged.",
+  "correctedCodePolicy": "initial_phase_not_scored_against_late_correction",
+  "originalFilesPreserved": true,
+  "finalMetricsChanged": false,
+  "hashAlgorithm": "SHA-256 of unmodified original bytes, not sanitized summary bytes",
+  "affectedBundles": [
+    {
+      "bundleId": "collaboration-model-pilot-20260928",
+      "files": {
+        "manifest.json": "83d3594e4fe6a93733452d6a3a094426eaf6d8ae212617bf3b84e54299016a9a",
+        "results.json": "fa9d436522dc9a6eeac6e8998eacf9515b8605dd3246a7ff7dfcb2db39c9b5bc",
+        "summary.json": "44b7f67d1aa6e72fc7362a091c260a23425111efcd49b540cadaf95e0fb4ecfc",
+        "single/calls.jsonl": "75fb5fbf4b755559a5544cbb96f2cbe60e4e5ec97d6cd1b4c6ef30157fc646fd",
+        "single/result.json": "71c5d012cf581654fe29e8b44494a4484da4c7d676e672b2c6bf2a6e12ee23ef",
+        "single/room.snapshot.json": "c93663b89021592153547cd91ae693c4e97760ab9051318c0a238234c337a175",
+        "legacy/calls.jsonl": "d8cc65d211de6636fb9a825d5b3a6eea52118228ea9b8b42e37c48cb8a08d9b5",
+        "legacy/result.json": "ce2d066e9d4b05348ea0a4327c131e37190576ff6e039bcc5fa67280b6890fa0",
+        "legacy/room.snapshot.json": "1f0a139665c9af4c3f5a711194a6b644d9a8be82440ea969f6ba4149d174f381",
+        "work/calls.jsonl": "cc66c4f84672890a93655249457e148f583863312e34f83379b73af9e9e5ae70",
+        "work/result.json": "81afe8d4026da3868c045548714e01eab12d8fffba7c18d23b75a35f381bf758",
+        "work/room.snapshot.json": "587eda46460664be7869b2192725dd2f10ab95ebb6f1531968fdf302328180e4"
+      }
+    },
+    {
+      "bundleId": "collaboration-scripted-replay-20260928-v1",
+      "files": {
+        "manifest.json": "cb177903528994fd238913e23176e23f9349447e41594e8729533518f7930171",
+        "results.jsonl": "e44e5b9c730a8e833194d561cfc81aee9c208be8e3c5728f9d28509ec102b938",
+        "summary.json": "39985b763eed43f0720376bda6c14bc00a59fafc360eca31a256f369a66ef71b"
+      }
+    }
+  ],
+  "originalErratumSha256": "0352cd8c2cf08f49fcef0f7c4b999edddb40a3a9218200c88f3bfc461ea7cdf0"
+}

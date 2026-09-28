@@ -49,7 +49,7 @@ test("registered tools derive actor from DSH execution and share the HTTP revisi
   let room;
   try {
     for (const name of ["chat_memory", "chat_charter_propose", "chat_charter_review", "chat_work", "chat_read_document"]) assert.ok(registered.has(name));
-    room = await request("/rooms", { name: "工具测试", members: [{ kind: "session", sessionId: "a", alias: "甲" }, { kind: "session", sessionId: "b", alias: "乙" }], profile: { charter: "原始纪律", source: { name: "只读记录.md", path: "/readonly/original.md" } } });
+    room = await request("/rooms", { name: "工具测试", collaboration: { strategy: "legacy" }, members: [{ kind: "session", sessionId: "a", alias: "甲" }, { kind: "session", sessionId: "b", alias: "乙" }], profile: { charter: "原始纪律", source: { name: "只读记录.md", path: "/readonly/original.md" } } });
     const source = await request(`/rooms/${room.id}/messages`, { author: "human:me", authorKind: "human", text: "新增长期要求：每项判断附可定位依据。" });
     await activate(0);
     await writeFile(join(directory,"paper.docx"),docxFixture());

@@ -1,7 +1,7 @@
 // Isolated browser fixture. It intentionally cannot create or run native Sessions.
 // Start: node scripts/ui-fixture.mjs
 import {createServer} from "node:http";
-import {mkdtemp,mkdir,readFile} from "node:fs/promises";
+import {mkdtemp,mkdir,readFile,access} from "node:fs/promises";
 import {tmpdir} from "node:os";
 import {dirname,join,resolve} from "node:path";
 import {createRequire} from "node:module";
@@ -54,6 +54,10 @@ const room=await seed.createConversation(group.id,{operationId:"fixture-existing
 await seed.send({roomId:room.id,author:"human:me",authorKind:"human",text:"此對話只供隔離介面驗證。可以調整參與者、建立群組與 Agent；原生 Session、模型執行與真實檔案操作皆已停用。",automaticDelivery:false});
 let draft=await seed.workspace.openDraft({kind:"group",another:true});
 draft=await seed.workspace.saveDraft(draft.id,{expectedRevision:draft.revision,operationId:"fixture-kept-draft",title:"保留中的團隊草稿",members:group.defaults.members.map((member,index)=>({...member,enabled:index<2})),environment:{cwd:workspace}});
+const task=await seed.createLedgerEntry(room.id,{kind:"task",title:"隔離測試報告",ownerSessionId:room.members[0].sessionId,acceptanceCriteria:"保留可取回的版本與限制",integration:true});
+await seed.publishArtifact(room.id,null,{operationId:"fixture-v1",entryId:task.id,expectedRevision:task.revision,logicalName:"fixture-report.md",content:"# 測試報告 v1\n初稿，尚待核查。"});
+await seed.publishArtifact(room.id,null,{operationId:"fixture-v2",entryId:task.id,expectedRevision:task.revision,logicalName:"fixture-report.md",content:"# 測試報告 v2\n加入限制，尚未驗收。"});
+await seed.send({roomId:room.id,author:"human:me",authorKind:"human",purpose:"correction",workId:task.id,text:"測試更正：此次只有兩項資料。",automaticDelivery:false});
 await seed.close();
 
 const disposers=[];
@@ -76,17 +80,23 @@ function resolveDshModulesDir(){
 }
 const dshModules=resolveDshModulesDir();
 const trajectoryModules=join(dshModules,"@deepseek-ai/dsh-client-ui-trajectory/node_modules");
+const uiModules=process.env.DCL_UI_MODULES_DIR;
+async function productionModule(name,candidates) {
+  const roots=uiModules?[uiModules]:[trajectoryModules,dshModules];
+  for(const root of roots)for(const candidate of candidates){const path=join(root,name,candidate);try{await access(path);return path;}catch{}}
+  throw new Error(`找不到 ${name} 的 React fixture runtime；可將 DCL_UI_MODULES_DIR 指向獨立安裝 React/ReactDOM 的 node_modules。`);
+}
 const moduleFiles={
-  react:join(trajectoryModules,"react/cjs/react.production.js"),
-  "react-dom":join(trajectoryModules,"react-dom/cjs/react-dom.production.js"),
-  scheduler:join(dshModules,"scheduler/cjs/scheduler.production.js"),
-  "react-dom/client":join(trajectoryModules,"react-dom/cjs/react-dom-client.production.js")
+  react:await productionModule("react",["cjs/react.production.js","cjs/react.production.min.js"]),
+  "react-dom":await productionModule("react-dom",["cjs/react-dom.production.js","cjs/react-dom.production.min.js"]),
+  scheduler:await productionModule("scheduler",["cjs/scheduler.production.js","cjs/scheduler.production.min.js"]),
+  "react-dom/client":await productionModule("react-dom",["cjs/react-dom-client.production.js","client.js"])
 };
 const sources=await Promise.all(Object.entries(moduleFiles).map(async([id,path])=>({id,path,text:await readFile(path,"utf8")})));
 for(const module of sources){
   for(const match of module.text.matchAll(/require\(["']([^"']+)["']\)/g))if(!moduleFiles[match[1]])throw new Error(`Unbundled production dependency ${match[1]} in ${module.path}`);
 }
-const vendor=`(function(){const definitions=Object.create(null),cache=Object.create(null);\n${sources.map(module=>`definitions[${JSON.stringify(module.id)}]=function(module,exports,require){\n${module.text}\n};`).join("\n")}\nwindow.__fixtureRequire=function require(id){if(cache[id])return cache[id].exports;if(!definitions[id])throw new Error('Unbundled fixture dependency: '+id);const module={exports:{}};cache[id]=module;definitions[id](module,module.exports,require);return module.exports;};})();`;
+const vendor=`(function(){const process={env:{NODE_ENV:"production"}};const definitions=Object.create(null),cache=Object.create(null);\n${sources.map(module=>`definitions[${JSON.stringify(module.id)}]=function(module,exports,require){\n${module.text}\n};`).join("\n")}\nwindow.__fixtureRequire=function require(id){if(cache[id])return cache[id].exports;if(!definitions[id])throw new Error('Unbundled fixture dependency: '+id);const module={exports:{}};cache[id]=module;definitions[id](module,module.exports,require);return module.exports;};})();`;
 
 function browserBootstrap(config){
   const React=window.__fixtureRequire("react"),ReactDOM=window.__fixtureRequire("react-dom/client");
@@ -106,7 +116,7 @@ function browserBootstrap(config){
       inject(_name,callback){return callback();},
       register(spec,Component){
         if(spec.name==="sidebar.footer.action"){footerRoot.render(h(Component));return ()=>footerRoot.render(null);}
-        if(spec.name!=="conversation")throw new Error(`Unexpected fixture slot ${spec.name}`);
+        if(spec.name!=="shell.overlay")throw new Error(`Unexpected fixture slot ${spec.name}`);
         native.hidden=true;workbenchHost.hidden=false;
         const root=ReactDOM.createRoot(workbenchHost,{onUncaughtError:record,onCaughtError:record});root.render(h(Component));
         return ()=>{root.unmount();workbenchHost.hidden=true;native.hidden=false;};

@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DshChatLocalService } from '../lib/room-store.js';
 
-async function setup(t) {
+async function setup(t, collaboration) {
   const dir = await mkdtemp(join(tmpdir(), 'dcl-identity-boundary-'));
   const calls = [];
   const ctx = { agents: { get: () => ({ cancel() {} }) },
@@ -16,7 +16,7 @@ async function setup(t) {
   t.after(async () => { await service.close().catch(() => {}); await rm(dir, { recursive: true, force: true }); });
   const people = await Promise.all(['Alice', 'Bob', 'Carol'].map(alias => service.directory.save({ operationId: alias, profile: { alias } })));
   const member = (sessionId, agent = people[0]) => ({ kind: 'session', sessionId, alias: sessionId, agentId: agent.id });
-  const room = await service.createRoom({ name: 'Main', autoDeliver: false, members: [member('owner'), member('reviewer', people[1])] });
+  const room = await service.createRoom({ name: 'Main', collaboration, autoDeliver: false, members: [member('owner'), member('reviewer', people[1])] });
   let turn = 0;
   const activate = async sessionId => {
     const index = calls.length;
@@ -96,7 +96,7 @@ test('a returning person cannot become independent reviewer of work they owned i
 });
 
 test('review checks submission identity after reviewer Session reuse and refuses ambiguous legacy owner history', async t => {
-  const h = await setup(t);
+  const h = await setup(t,{strategy:'legacy'});
   let task = await h.service.createLedgerEntry(h.room.id, { kind: 'task', title: 'Delivery', ownerSessionId: 'owner', reviewerSessionId: 'reviewer' });
   const source = await h.activate('owner');
   const operate = (session, action, input = {}) => h.service.operateWork(h.room.id, session, { operationId: `${session}-${action}`, action, entryId: task.id, expectedRevision: task.revision, summary: action, sourceMessageIds: [source.id], ...input });

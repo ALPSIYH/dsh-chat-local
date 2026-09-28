@@ -41,18 +41,18 @@ test("v11 migration keeps legacy messages, work and Session bindings intact",()=
   const state=JSON.parse(await readFile(h.path,"utf8"));state.version=11;delete state.groups;delete state.workspace;delete state.rooms[0].groupId;
   // A real v11 fixture predates the additive v15 identity directory and `tick`.
   for(const member of state.rooms[0].members){delete member.agentId;delete member.agentRevision;delete member.participationId;}
-  delete state.rooms[0].tick;
+  delete state.rooms[0].tick;delete state.rooms[0].collaboration;
   const original=structuredClone(state.rooms[0]);await h.service.close();await writeFile(h.path,JSON.stringify(state));
   const restored=new DshChatLocalService(h.ctx,{path:h.path});
   try{
-    await restored.ready;const saved=JSON.parse(await readFile(h.path,"utf8"));assert.equal(saved.version,17);assert.equal(saved.groups.length,1);assert.equal(saved.rooms.length,1);
+    await restored.ready;const saved=JSON.parse(await readFile(h.path,"utf8"));assert.equal(saved.version,18);assert.equal(saved.groups.length,1);assert.equal(saved.rooms.length,1);
     for(const member of saved.rooms[0].members){
       assert.ok(member.agentId);assert.equal(member.agentRevision,1);assert.ok(member.participationId);
       assert.ok(saved.workspace.agents.some(agent=>agent.id===member.agentId));
       assert.ok(saved.workspace.participations.some(participant=>participant.id===member.participationId&&participant.roomId===room.id&&participant.sessionId===member.sessionId));
       delete member.agentId;delete member.agentRevision;delete member.participationId;
     }
-    delete saved.rooms[0].groupId;
+    delete saved.rooms[0].groupId;assert.equal(saved.rooms[0].collaboration.strategy,"legacy");delete saved.rooms[0].collaboration;
     // `tick` is additive in v15: a v11 fixture has none, so the migration lands it at zero.
     assert.equal(saved.rooms[0].tick, 0);delete saved.rooms[0].tick;
     assert.deepEqual(saved.rooms[0],original);assert.equal(h.nativeWrites,0);
@@ -167,3 +167,22 @@ test("native Agent preset is copied as configuration, not an inherited Session l
   const config=await snapshotMemberConfiguration({sessionQuery:{async observeSession(){return {header:{cwd:"/tmp"},projections:{values:{agentPreset:"research-tools",modelSelection:{next:{provider:"p",model:"m"}}}},[Symbol.dispose](){}};}}},{sessionId:"source"});
   assert.equal(config.agentPreset,"research-tools");assert.equal("events" in config,false);
 });
+
+test("group defaults project collaboration coordinator by stable identity and never copy request or budget state",()=>fixture(async h=>{
+ const old=await seed(h.service);
+ await h.service.setCollaborationPolicy(old.id,{expectedRevision:1,strategy:'discussion',coordinatorSessionId:'old-b',budget:{maxExecutions:7,maxPerMember:3,integrationReserve:1,reviewReserve:1}});
+ await send(h.service,old.id,'舊請求');
+ const live=h.service.state.rooms.find(room=>room.id===old.id);
+ live.collaboration.budgetAccounts.push({id:'old-budget',reservations:[]});live.collaboration.activeBudgetId='old-budget';
+ const group=(await h.service.listGroups())[0],current=await h.service.resolveRoom(old.id);
+ await h.service.saveGroupDefaults(old.id,{expectedRevision:current.revision,expectedGroupRevision:group.revision});
+ const defaults=(await h.service.groupConfiguration(old.id)).collaboration;
+ assert.equal(defaults.strategy,'discussion');assert.equal(defaults.coordinatorAgentId,live.members.find(member=>member.sessionId==='old-b').agentId);
+ assert.equal(defaults.requests,undefined);assert.equal(defaults.budgetAccounts,undefined);assert.equal(defaults.coordinatorSessionId,undefined);
+ for(const fresh of [await h.service.createConversation(old.id,{operationId:'policy-copy'}),await h.service.createRoom({name:'複製策略',copyFromRoomId:old.id})]){
+   const copied=h.service.state.rooms.find(room=>room.id===fresh.id),view=await h.service.collaborationOverview(fresh.id);
+   assert.equal(view.strategy,'discussion');assert.equal(view.budget.maxExecutions,7);assert.notEqual(view.coordinatorSessionId,'old-b');
+   assert.equal(copied.members.find(member=>member.sessionId===view.coordinatorSessionId).agentId,defaults.coordinatorAgentId);
+   assert.deepEqual(view.requests,[]);assert.deepEqual(view.unreviewed,[]);assert.deepEqual(view.budgetAccounts,[]);assert.equal(copied.collaboration.activeBudgetId,undefined);
+ }
+}));

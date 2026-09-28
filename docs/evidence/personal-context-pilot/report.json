@@ -1,0 +1,49 @@
+{
+  "schemaVersion": 1,
+  "scope": "small stateless provider pilot of actual RoomStore native context; not a longitudinal personality validation",
+  "invocations": 6,
+  "totalTokens": 4247,
+  "usageMissing": false,
+  "elapsedMs": 34253,
+  "stopReason": "planned_calls_completed",
+  "byArm": {
+    "baseline": {
+      "attempts": 3,
+      "passed": 0,
+      "mean": 0,
+      "sampleVariance": 0
+    },
+    "candidate": {
+      "attempts": 3,
+      "passed": 3,
+      "mean": 1,
+      "sampleVariance": 0
+    }
+  },
+  "conclusive": false,
+  "limits": {
+    "maxCalls": 6,
+    "wallTimeMs": 1200000,
+    "observedTokenCeiling": 200000,
+    "stopBeforeNextAt": 150000,
+    "inputBytesPerCall": 50000,
+    "maxOutputTokensRequested": 2048,
+    "nextCallTotalTokenUpperBound": "not-certified; input byte cap and 50k reserve are conservative guards, not provider tokenizer proof",
+    "transportRetries": "not-observed"
+  },
+  "versions": {
+    "baselineModule": "<baseline-8484fb1>/lib/room-store.js",
+    "baselineSourceHash": "8c201be2303d769bfd4d4e84a801bcb599e752fb808c4773794d9e8e1b68638f",
+    "candidateSourceHash": "57ccf71d58f7a94bbe7ad8d02799044ec752399698e8c4cf537bc5bb212e5d7b",
+    "hashObservation": "Entry-module hashes measured at report close, not a loaded dependency build attestation; actual submitted context is preserved with per-trial hashes in prompts.json."
+  },
+  "limitations": [
+    "Tiny heterogeneous case sample; no causal efficacy or stable personality conclusion.",
+    "No tools or autonomous memory decisions; material is seeded by the evaluator.",
+    "Tests actual bounded native context, not provider/temperature invariance.",
+    "Behavioral style and task obedience require reading the preserved answers.",
+    "Model/provider identities are route observations, not provider build hashes.",
+    "Baseline answered unknown honestly in two recall-limited cases; it did not fabricate a date. Baseline new-task answer was substantively correct but failed strict JSON parsing because of fences.",
+    "Zero sample variance here is over three heterogeneous binary case results, not evidence of low model variance. No within-condition replication was done."
+  ]
+}

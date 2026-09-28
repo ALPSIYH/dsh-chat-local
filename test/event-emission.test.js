@@ -40,7 +40,7 @@ async function harness(options = {}) {
   };
   const service = new DshChatLocalService(ctx, { path: join(directory, "rooms.json"), maxRounds: 1, replyTimeoutMs: options.replyTimeoutMs ?? 800 });
   await service.ready;
-  const room = await service.createRoom({ name: "事件测试", autoDeliver: options.autoDeliver ?? false,
+  const room = await service.createRoom({ collaboration: { strategy: "legacy" }, name: "事件测试", autoDeliver: options.autoDeliver ?? false,
     members: [{ kind: "session", sessionId: "s1", alias: "成员" }] });
   return { directory, service, room, calls, ctx };
 }
@@ -136,7 +136,7 @@ test("a scheduled turn records its tick and the exact recipient order", async (t
     finally { await rm(directory, { recursive: true, force: true }); }
   });
   await service.ready;
-  const room = await service.createRoom({ name: "顺序", autoDeliver: true, members: [
+  const room = await service.createRoom({ collaboration: { strategy: "legacy" }, name: "顺序", autoDeliver: true, members: [
     { kind: "session", sessionId: "s1", alias: "甲" },
     { kind: "session", sessionId: "s2", alias: "乙" }] });
   await service.send({ roomId: room.id, author: "human:me", authorKind: "human", text: "开始" });
@@ -169,7 +169,7 @@ test("a rotated turn records the executed sequence the configured order cannot s
   const path = join(directory, "rooms.json");
   const first = new DshChatLocalService(ctx, { path, maxRounds: 1, replyTimeoutMs: 800 });
   await first.ready;
-  const room = await first.createRoom({ name: "轮转", autoDeliver: true, members: [
+  const room = await first.createRoom({ collaboration: { strategy: "legacy" }, name: "轮转", autoDeliver: true, members: [
     { kind: "session", sessionId: "s1", alias: "甲" },
     { kind: "session", sessionId: "s2", alias: "乙" }] });
   await first.send({ roomId: room.id, author: "human:me", authorKind: "human", text: "一" });
@@ -204,7 +204,7 @@ test("a freshly created room starts at tick zero and persists it", async () => {
   await service.ready;
   // No members and autoDeliver off, so this room never schedules a turn: `tick`
   // must exist on its own rather than be introduced by the scheduler.
-  const room = await service.createRoom({ name: "零", autoDeliver: false });
+  const room = await service.createRoom({ collaboration: { strategy: "legacy" }, name: "零", autoDeliver: false });
   assert.equal(room.tick, 0);
   await service.close();
   assert.equal(JSON.parse(await readFile(path, "utf8")).rooms[0].tick, 0);
@@ -225,7 +225,7 @@ test("the tick is persisted and keeps increasing across a restart", async () => 
   await first.ready;
   // autoDeliver must be true: the tick advances per *scheduled turn*, so a room
   // that never schedules one has no ticks to compare.
-  const room = await first.createRoom({ name: "t", autoDeliver: true, members: [{ kind: "session", sessionId: "s1", alias: "甲" }] });
+  const room = await first.createRoom({ collaboration: { strategy: "legacy" }, name: "t", autoDeliver: true, members: [{ kind: "session", sessionId: "s1", alias: "甲" }] });
   await first.send({ roomId: room.id, author: "human:me", authorKind: "human", text: "一" });
   const firstDeadline = Date.now() + 2000;
   while (!deliveries.length && Date.now() < firstDeadline) await new Promise((resolve) => setTimeout(resolve, 5));
@@ -251,7 +251,7 @@ test("the exact prompt handed to a member is recorded by hash and by content", a
   };
   const service = new DshChatLocalService(ctx, { path: join(directory, "rooms.json"), maxRounds: 1, replyTimeoutMs: 800 });
   await service.ready;
-  const room = await service.createRoom({ name: "提示词", autoDeliver: true,
+  const room = await service.createRoom({ collaboration: { strategy: "legacy" }, name: "提示词", autoDeliver: true,
     members: [{ kind: "session", sessionId: "s1", alias: "甲" }] });
   await service.send({ roomId: room.id, author: "human:me", authorKind: "human", text: "议题" });
   const deadline = Date.now() + 2000;
@@ -273,7 +273,7 @@ test("the tick reaches disk, so a restart resumes from it instead of replaying i
   const path = join(directory, "rooms.json");
   const first = new DshChatLocalService(ctx, { path, maxRounds: 1, replyTimeoutMs: 800 });
   await first.ready;
-  const room = await first.createRoom({ name: "t", autoDeliver: true, members: [{ kind: "session", sessionId: "s1", alias: "甲" }] });
+  const room = await first.createRoom({ collaboration: { strategy: "legacy" }, name: "t", autoDeliver: true, members: [{ kind: "session", sessionId: "s1", alias: "甲" }] });
   await first.send({ roomId: room.id, author: "human:me", authorKind: "human", text: "一" });
   await waitFor(() => deliveries.length === 1, "the first delivery");
   await first.close();
@@ -491,7 +491,7 @@ test("a restart records an event for every in-flight delivery it recovers as fai
   // long reply timer holding the test file open.
   t.after(() => first.close());
   await first.ready;
-  const room = await first.createRoom({ name: "重启", autoDeliver: true, members: [{ kind: "session", sessionId: "s1", alias: "甲" }] });
+  const room = await first.createRoom({ collaboration: { strategy: "legacy" }, name: "重启", autoDeliver: true, members: [{ kind: "session", sessionId: "s1", alias: "甲" }] });
   const sent = await first.send({ roomId: room.id, author: "human:me", authorKind: "human", text: "一" });
   await waitFor(() => deliveries.length === 1, "the in-flight delivery");
   await first.settledAudit();
@@ -567,7 +567,7 @@ test("the message.created of a superseding send follows the settles that same sa
   // long reply timer holding the test file open.
   t.after(() => service.close());
   await service.ready;
-  const room = await service.createRoom({ name: "取代", autoDeliver: true, members: [
+  const room = await service.createRoom({ collaboration: { strategy: "legacy" }, name: "取代", autoDeliver: true, members: [
     { kind: "session", sessionId: "s1", alias: "甲" },
     { kind: "session", sessionId: "s2", alias: "乙" }] });
   await service.send({ roomId: room.id, author: "human:me", authorKind: "human", text: "一" });
@@ -613,7 +613,7 @@ test("a delivery status change whose save never lands leaves no delivery event b
   // long reply timer holding the test file open.
   t.after(() => service.close());
   await service.ready;
-  const room = await service.createRoom({ name: "幻影", autoDeliver: true,
+  const room = await service.createRoom({ collaboration: { strategy: "legacy" }, name: "幻影", autoDeliver: true,
     members: [{ kind: "session", sessionId: "s1", alias: "甲" }] });
   await service.send({ roomId: room.id, author: "human:me", authorKind: "human", text: "开始" });
   const call = await waitFor(() => calls[0], "the member delivery");
@@ -670,7 +670,7 @@ async function ledgerHarness() {
   const service = new DshChatLocalService(ctx, { path: join(directory, "rooms.json"),
     maxRounds: 1, maxReplies: 1, replyTimeoutMs: 5_000, monitorIntervalMs: 3_600_000 });
   await service.ready;
-  const room = await service.createRoom({ name: "台账事件", autoDeliver: true, members: [
+  const room = await service.createRoom({ collaboration: { strategy: "legacy" }, name: "台账事件", autoDeliver: true, members: [
     { kind: "session", sessionId: "s1", alias: "记录" },
     { kind: "session", sessionId: "s2", alias: "执行" },
     { kind: "session", sessionId: "s3", alias: "复核" }] });
@@ -1592,7 +1592,7 @@ test("a session title carrying a newline is collapsed before it reaches the prom
   // The first member is added without an alias, so its label is the DSH session
   // title taken verbatim — the second source of a label, and the one the store
   // cannot sanitise without changing what a room may hold.
-  const room = await service.createRoom({ name: "标题别名", autoDeliver: true, members: [
+  const room = await service.createRoom({ collaboration: { strategy: "legacy" }, name: "标题别名", autoDeliver: true, members: [
     { kind: "session", sessionId: "s1" }, { kind: "session", sessionId: "s2", alias: "乙" }] });
   assert.equal((await service.resolveRoom(room.id)).members.find((member) => member.sessionId === "s1").alias, title);
   await wokenPrompts(service, room.id, calls, "第一轮");
